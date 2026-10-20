@@ -28,6 +28,8 @@ from .db import create_engine, run_migrations
 from .errors import ApiError
 from .log import configure_logging
 from .models import User, utcnow
+from .storage import LocalStorage
+from .uploads import service as upload_service
 
 #: 目录权限：属主与同组可进入，其他用户无权限（企划第 11.1 节）。
 DIRECTORY_MODE = 0o750
@@ -65,6 +67,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     check = subcommands.add_parser("check-config", help="只校验配置，不启动服务")
     check.set_defaults(handler=_cmd_check_config)
+
+    upload = subcommands.add_parser("import", help="从服务器本地路径导入文件")
+    upload.add_argument("path", type=Path, help="要导入的文件路径")
+    upload.set_defaults(handler=_cmd_import)
 
     _build_user_commands(subcommands)
     _build_site_commands(subcommands)
@@ -393,6 +399,28 @@ def _cmd_token_revoke(args: argparse.Namespace) -> int:
         token = service.get_token(db, args.token_id)
         service.revoke_token(db, token, actor=_actor(db))
         print(f"已撤销令牌：{token.id}")
+    return 0
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    """从服务器本地路径导入。走与 HTTP 上传相同的会话、校验与落盘逻辑。"""
+    settings = _load(args)
+    storage = LocalStorage.from_settings(settings)
+    path = args.path.expanduser()
+    with _session(settings) as db:
+        owner = _actor(db)
+        session = upload_service.import_file(
+            db, settings=settings, storage=storage, actor=owner, path=path
+        )
+        print(f"已导入：{path.name}")
+        print(f"类型：{session.kind}（{session.mime}）")
+        print(f"大小：{session.byte_size} 字节")
+        print(f"SHA-256：{session.sha256}")
+        print(f"内容 ID：{session.asset_id}")
+        print(f"存储键：{session.storage_key}")
+        duplicate = upload_service.duplicate_of(db, session)
+        if duplicate:
+            print(f"提示：库中已有相同字节的上传（{duplicate}）")
     return 0
 
 

@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 2 部分（身份、会话与权限）已完成**。上传、发布、公开读取、页面尚未实现。
+当前进度：**第 3 部分（磁盘存储与上传）已完成**。内容登记、发布、公开读取、页面尚未实现。
 
 ## 目录
 
@@ -14,11 +14,12 @@
 backend_ctrl/
   plan/                     企划书与分步实现规划
   src/ctrlstore/
-    config.py               配置分层与校验
+    config.py               配置分层与校验（含各类型大小上限）
     db.py                   SQLite 连接、PRAGMA、迁移执行
     models.py               数据模型（表结构）
     errors.py               统一错误码与响应
     audit.py                审计记录
+    idempotency.py          幂等键
     health.py               健康判据（内存、磁盘）
     log.py                  JSON 日志
     main.py                 API 入口与路由挂载
@@ -31,11 +32,18 @@ backend_ctrl/
       throttle.py           登录失败限速
       service.py            接口与命令行共用的业务规则
       deps.py               身份解析与权限检查的唯一入口
+    storage/                存储层（对象键 + 本地文件系统）
+      keys.py               storage_key 生成与校验
+      local.py              分片写入、合并、落盘、清理
+    uploads/                上传
+      inspection.py         文件头识别、类型一致性、像素与大小上限
+      service.py            会话、分片、合并、直传、过期清理
+      router.py             管理接口 /uploads
     admin_api/              管理接口 /api/admin/v1
       session.py users.py sites.py schemas.py
-    assets/ uploads/ content/ imaging/ public_api/ storage/
+    assets/ content/ imaging/ public_api/
                             后续部分按此分层填充
-  alembic/                  迁移脚本（0001 基线、0002 身份）
+  alembic/                  迁移脚本（0001 基线、0002 身份、0003 上传）
   deploy/                   Nginx、systemd、示例配置
   scripts/                  备份与恢复
   tests/                    pytest
@@ -100,6 +108,8 @@ ctrlstore site list
 ctrlstore token create (--site 标识 | --user 用户名) [--name 备注] [--expires-days N]
 ctrlstore token list
 ctrlstore token revoke <令牌 ID>
+
+ctrlstore import <本地路径>                  # 从服务器路径导入，免去先下载再上传
 ```
 
 `init` 会提示输入两次密码；非交互环境加 `--password-stdin` 从标准输入读一行。
@@ -107,6 +117,9 @@ ctrlstore token revoke <令牌 ID>
 
 `serve` 在前台跑一个 Uvicorn 进程。部署基线是 systemd 起两个 `ctrlstore serve` 进程 + 一个 worker，
 不靠 Uvicorn 自带的 `--workers`，这样每个进程的配置、日志和资源上限都由 systemd 统一约束（第 9 部分给单元文件）。
+
+`import` 与 HTTP 上传共用同一套校验和落盘逻辑：类型按文件头判定，超限直接拒绝，
+导入后打印类型、大小、SHA-256、预分配的内容 ID 与存储键。
 
 ## 接口
 
@@ -124,9 +137,15 @@ ctrlstore token revoke <令牌 ID>
 | GET/POST | `/api/admin/v1/sites` | 所有者 |
 | GET/POST | `/api/admin/v1/tokens` | 所有者；签发只返回一次明文 |
 | DELETE | `/api/admin/v1/tokens/{id}` | 所有者；撤销令牌 |
+| POST | `/api/admin/v1/uploads` | `asset.upload`；开分片会话 |
+| GET | `/api/admin/v1/uploads/{id}` | `asset.upload`；查会话状态与已收分片 |
+| PUT | `/api/admin/v1/uploads/{id}/parts/{n}` | `asset.upload`；写第 n 片（原始字节） |
+| POST | `/api/admin/v1/uploads/{id}/complete` | `asset.upload`；合并校验落盘，支持 `Idempotency-Key` |
+| DELETE | `/api/admin/v1/uploads/{id}` | `asset.upload`；放弃并删临时文件 |
+| POST | `/api/admin/v1/uploads/direct` | `asset.upload`；multipart 一次上传 |
 
 错误格式固定为 `{"error":{"code":"...","message":"..."}}`，`code` 稳定（`unauthorized`、`forbidden`、
-`not_found`、`conflict`、`invalid`、`rate_limited` ……），`message` 是中文。
+`not_found`、`conflict`、`invalid`、`too_large`、`rate_limited`、`insufficient_storage` ……），`message` 是中文。
 
 ### 认证与 CSRF
 
@@ -149,6 +168,61 @@ Cookie 会话的所有写操作必须带 `X-CSRF-Token` 头，值取自 `POST /s
 `folder.manage`、`collection.manage`、`tag.manage`。所有者不读权限表，代码里视为拥有全部；
 新编辑默认零权限。预设 `editor` 一次授予八项。检查入口只有一个：`deps.require_permission(name)`。
 
+## 上传与存储
+
+### 两条上传路径
+
+| 场景 | 做法 |
+| --- | --- |
+| 小文件（100 MB 以内够用） | `POST /uploads/direct`，一次 multipart |
+| 大文件、需要断点续传 | `POST /uploads` 建会话 → 逐片 `PUT .../parts/{n}` → `POST .../complete` |
+
+直传不是另一套实现：它内部就是「建会话 + 写第 1 片 + 完成」，所以类型判断、上限、
+哈希与落盘只有一份代码（`uploads/service.py`）。命令行 `ctrlstore import` 同样走这条路。
+
+分片序号从 1 开始，完成时要求连续；同一序号重复提交就覆盖，客户端因此不需要额外协议。
+`GET /uploads/{id}` 返回已收到的分片，供续传前确认进度。
+
+未完成的会话 24 小时后作废。**到期在使用时结算**：读状态、写分片、合并、取消都会先比
+`expires_at`，过期就当场清掉临时目录并标成 `expired`，再返回 409——不依赖「下一次有人建会话」
+才会清理。建会话时另有一次批量清理，把其他用户遗留的过期会话一并收掉。
+
+每名用户同时最多 2 个未完成会话，全库 4 个；已作废的会话不占额度。
+
+`POST .../complete` 接受 `Idempotency-Key`：24 小时内同一键 + 同一请求返回第一次的结果，
+换请求体则 409。直传没有稳定请求体，需要幂等时请用分片流程。
+
+### 类型识别
+
+只看文件头，不信浏览器申报（`uploads/inspection.py`）：
+
+* 扩展名必须在允许名单里（`.jpg .jpeg .png .gif .webp .mp4 .webm .md .markdown .pdf .docx .xlsx .txt`）；
+  HTML、SVG、zip、exe、旧版 `.doc/.xls` 都在这道关被挡下；
+* 文件头判定出的类型必须与扩展名一致，否则 422；
+* 客户端声明的 `Content-Type` 若存在且不是 `application/octet-stream`，也要一致；
+  纯文本类只要求 `text/*`（`.md` 报 `text/plain` 很常见）；
+* docx/xlsx 只读 ZIP 条目名判断，不解压内容，避免解压炸弹；
+* 图片只读尺寸头，超过 4000 万像素拒绝，不会把整图解码进内存。
+
+### 落盘与上限
+
+```text
+data/originals/aa/<asset_id>/v1/original.jpg   校验通过后的原件（同盘 os.replace，原子）
+data/tmp/uploads/<session>/parts/000001.part   未完成的分片
+```
+
+`storage_key` 只由服务端生成：`aa` 取内容 ID 前两位，后接版本目录与固定文件名。
+读取前再校验一次形状，`..`、反斜杠、绝对路径一律拒绝（`storage/keys.py`）。
+
+单文件上限按类型配置（`[limits]`，默认图片 30 MB、视频 2 GB、文档 50/100 MB、文本 2 MB）。
+磁盘剩余低于 10 GB 或低于总容量 5% 时，建会话与合并前都会拒绝（507 `insufficient_storage`），
+健康接口同时标为 `degraded`。
+
+### 完成上传之后
+
+第 3 部分到此为止：字节已经在 `originals/`，会话里留有 `asset_id`、`storage_key`、`kind`、`mime`、
+`sha256`、尺寸，但还没有 `assets` 行。登记、版本、发布分别是第 4、5 部分的事。
+
 ## 数据库
 
 SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON`、`synchronous=NORMAL`、
@@ -159,7 +233,7 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 共三条连接，写锁竞争可预测。只有 API 和 worker 打开库文件，网站只走 HTTP。
 
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
-`0001` 基线，`0002` 身份与会话六张表。「至多一个所有者」用部分唯一索引在库层强制，
+`0001` 基线，`0002` 身份与会话六张表，`0003` 上传会话与幂等键。「至多一个所有者」用部分唯一索引在库层强制，
 不只靠应用代码。时间一律按 UTC 存不带时区的值。
 
 迁移用 Alembic，`render_as_batch=True`（SQLite 改表必须批处理）。新增迁移：
@@ -176,5 +250,6 @@ JSON 行输出到 stdout，由 systemd 收进 journald。`log.py` 会丢弃命�
 `password`、`secret`、`token`、`cookie`、`authorization`、`csrf`、`body` 等关键字的字段，
 异常只保留类型与消息。日志里不写文件正文。
 
-审计写在 `audit_logs`：登录成功与失败、退出、建账号、权限变更、停用、改密码、建站点、签发与撤销令牌。
-登录失败的记录里只有用户名和 IP，不记密码。
+审计写在 `audit_logs`：登录成功与失败、退出、建账号、权限变更、停用、改密码、建站点、签发与撤销令牌，
+以及上传的开始、完成、取消与失败。登录失败的记录里只有用户名和 IP，不记密码；上传记录里只有类型、
+字节数与哈希，不记文件正文。

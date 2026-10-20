@@ -32,6 +32,17 @@ session_idle_hours = 2
 # 启用 HTTPS 之后必须改为 true，否则会话 Cookie 可能随明文请求被带走。
 cookie_secure = false
 
+# —— 单文件上限（字节）——
+# 视频上限调大之前先确认数据盘剩余空间：企划按「最大视频 × 2」估算。
+[limits]
+image = 31457280        # 30 MB
+video = 2147483648      # 2 GB
+markdown = 2097152      # 2 MB
+text = 2097152          # 2 MB
+pdf = 104857600         # 100 MB
+docx = 52428800         # 50 MB
+xlsx = 52428800         # 50 MB
+
 # —— 进程 ——
 log_level = "INFO"
 api_host = "127.0.0.1"

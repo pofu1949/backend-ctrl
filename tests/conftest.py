@@ -26,6 +26,7 @@ from ctrlstore.auth import service
 from ctrlstore.config import Settings
 from ctrlstore.db import create_engine, run_migrations
 from ctrlstore.main import create_app
+from ctrlstore.storage import LocalStorage
 
 #: 测试用的假密钥，只在进程内使用。
 TEST_SECRETS = {
@@ -78,6 +79,12 @@ def owner(db: DbSession):
     user = service.create_owner(db, username="owner", password=OWNER_PASSWORD)
     db.commit()
     return user
+
+
+@pytest.fixture
+def storage(settings: Settings) -> LocalStorage:
+    """与配置一致的存储实现（原件目录、临时目录）。"""
+    return LocalStorage.from_settings(settings)
 
 
 @pytest.fixture

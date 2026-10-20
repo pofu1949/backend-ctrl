@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MiB = 1024**2
 GiB = 1024**3
 
 #: 配置文件的默认位置。
@@ -51,6 +52,29 @@ class ConfigError(RuntimeError):
     """配置不完整、不可读或存在安全问题时抛出，进程不应带着它启动。"""
 
 
+class SizeLimits(BaseModel):
+    """各类型的单文件上限（企划第 9 章）。``kind`` 与内容类型一一对应。"""
+
+    image: int = 30 * MiB
+    video: int = 2 * GiB
+    markdown: int = 2 * MiB
+    text: int = 2 * MiB
+    pdf: int = 100 * MiB
+    docx: int = 50 * MiB
+    xlsx: int = 50 * MiB
+
+    @field_validator("image", "video", "markdown", "text", "pdf", "docx", "xlsx")
+    @classmethod
+    def _positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("上限必须是正数")
+        return value
+
+    def for_kind(self, kind: str) -> int:
+        """取某类型的上限。未知类型按最小的一档处理，避免放过超大文件。"""
+        return int(getattr(self, kind, self.markdown))
+
+
 class Settings(BaseSettings):
     """运行期配置。字段默认值即是部署基线（见企划第 17.4 节）。"""
 
@@ -75,6 +99,9 @@ class Settings(BaseSettings):
     min_free_bytes: int = 10 * GiB
     min_free_ratio: float = 0.05
     min_available_memory_bytes: int = 1 * GiB
+
+    # —— 单文件上限 ——
+    limits: SizeLimits = Field(default_factory=SizeLimits)
 
     # —— 会话与 Cookie ——
     #: 绝对有效期（小时），从登录算起。

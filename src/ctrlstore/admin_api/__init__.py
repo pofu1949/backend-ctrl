@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from ..uploads.router import router as uploads_router
 from . import session, sites, users
 
 router = APIRouter()
 router.include_router(session.router)
 router.include_router(users.router)
 router.include_router(sites.router)
+router.include_router(uploads_router)

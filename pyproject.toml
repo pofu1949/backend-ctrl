@@ -16,6 +16,8 @@ dependencies = [
   "pydantic-settings==2.9.1",
   "psutil==7.0.0",
   "argon2-cffi==25.1.0",
+  "pillow==13.0.0",
+  "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +52,15 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI 的依赖注入就是靠参数默认值表达，不是可变默认值的误用。
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header"]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.File",
+    "fastapi.Form",
+    "ctrlstore.auth.deps.require_permission",
+]
 
 [dependency-groups]
 dev = [

@@ -42,7 +42,7 @@ def check_health(settings: Settings) -> HealthReport:
     """按内存与磁盘阈值给出 ``ok`` 或 ``degraded``。"""
     reasons: list[str] = []
 
-    usage = _disk_usage(settings.data_dir)
+    usage = disk_usage(settings.data_dir)
     if usage is None:
         reasons.append(REASON_DISK_UNAVAILABLE)
     else:
@@ -58,7 +58,7 @@ def check_health(settings: Settings) -> HealthReport:
     return HealthReport(status="degraded" if reasons else "ok", reasons=tuple(reasons))
 
 
-def _disk_usage(path: Path) -> tuple[int, int] | None:
+def disk_usage(path: Path) -> tuple[int, int] | None:
     """返回 (剩余字节, 总字节)。
 
     数据目录可能尚未创建（首次 ``init`` 之前），此时向上找最近一个存在的目录，

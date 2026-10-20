@@ -55,6 +55,14 @@ class ApiError(Exception):
         return cls(422, INVALID, message)
 
     @classmethod
+    def too_large(cls, message: str) -> ApiError:
+        return cls(413, TOO_LARGE, message)
+
+    @classmethod
+    def insufficient_storage(cls, message: str) -> ApiError:
+        return cls(507, INSUFFICIENT_STORAGE, message)
+
+    @classmethod
     def rate_limited(cls, message: str = "尝试过于频繁，请稍后再试") -> ApiError:
         return cls(429, RATE_LIMITED, message)
 

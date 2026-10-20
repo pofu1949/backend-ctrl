@@ -23,6 +23,7 @@ ACTOR_SYSTEM = "system"
 TARGET_USER = "user"
 TARGET_SITE = "site"
 TARGET_TOKEN = "token"
+TARGET_UPLOAD = "upload"
 
 #: 已知动作。集中列出，避免日志和界面里出现拼错的动作名。
 LOGIN = "login"
@@ -35,6 +36,10 @@ PERMISSIONS_CHANGED = "permissions_changed"
 SITE_CREATED = "site_created"
 TOKEN_CREATED = "token_created"
 TOKEN_REVOKED = "token_revoked"
+UPLOAD_CREATED = "upload_created"
+UPLOAD_COMPLETED = "upload_completed"
+UPLOAD_CANCELLED = "upload_cancelled"
+UPLOAD_FAILED = "upload_failed"
 
 
 def record(
