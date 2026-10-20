@@ -111,13 +111,22 @@ def owner_writer(principal: Principal = Depends(writer)) -> Principal:
     return principal
 
 
+def ensure_permission(principal: Principal, name: str) -> Principal:
+    """按能力放行。用于「权限取决于请求内容」的端点。
+
+    依赖工厂 ``require_permission`` 只能表达固定权限；替换文件要 ``asset.update``、
+    新建内容要 ``asset.upload``，这类判断在端点里用本函数，写仍走 ``writer``。
+    """
+    if not principal.can(name):
+        raise errors.ApiError.forbidden(f"缺少权限：{name}")
+    return principal
+
+
 def require_permission(name: str):
     """按能力放行的依赖工厂，供内容接口使用。"""
 
     def dependency(principal: Principal = Depends(writer)) -> Principal:
-        if not principal.can(name):
-            raise errors.ApiError.forbidden(f"缺少权限：{name}")
-        return principal
+        return ensure_permission(principal, name)
 
     return dependency
 

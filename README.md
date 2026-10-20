@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 3 部分（磁盘存储与上传）已完成**。内容登记、发布、公开读取、页面尚未实现。
+当前进度：**第 4 部分（目录、内容与版本）已完成**。发布、公开读取、页面尚未实现。
 
 ## 目录
 
@@ -39,11 +39,17 @@ backend_ctrl/
       inspection.py         文件头识别、类型一致性、像素与大小上限
       service.py            会话、分片、合并、直传、过期清理
       router.py             管理接口 /uploads
-    admin_api/              管理接口 /api/admin/v1
-      session.py users.py sites.py schemas.py
-    assets/ content/ imaging/ public_api/
+    folders/                目录树（物化路径、防成环）
+      service.py router.py schemas.py
+    tags/                   标签（名称唯一、slug 派生）
+      service.py router.py
+    assets/                 内容与版本
+      markdown.py           front matter 与正文引用
+      service.py            登记、元数据、版本替换与保留、引用维护
+      router.py schemas.py  管理接口 /assets
+    content/ imaging/ public_api/
                             后续部分按此分层填充
-  alembic/                  迁移脚本（0001 基线、0002 身份、0003 上传）
+  alembic/                  迁移脚本（0001 基线、0002 身份、0003 上传、0004 内容）
   deploy/                   Nginx、systemd、示例配置
   scripts/                  备份与恢复
   tests/                    pytest
@@ -119,7 +125,11 @@ ctrlstore import <本地路径>                  # 从服务器路径导入，�
 不靠 Uvicorn 自带的 `--workers`，这样每个进程的配置、日志和资源上限都由 systemd 统一约束（第 9 部分给单元文件）。
 
 `import` 与 HTTP 上传共用同一套校验和落盘逻辑：类型按文件头判定，超限直接拒绝，
-导入后打印类型、大小、SHA-256、预分配的内容 ID 与存储键。
+导入后打印类型、大小、SHA-256、内容 ID 与存储键。加 `--asset-id` 可作为该内容的新版本导入。
+
+```bash
+ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
+```
 
 ## 接口
 
@@ -137,12 +147,25 @@ ctrlstore import <本地路径>                  # 从服务器路径导入，�
 | GET/POST | `/api/admin/v1/sites` | 所有者 |
 | GET/POST | `/api/admin/v1/tokens` | 所有者；签发只返回一次明文 |
 | DELETE | `/api/admin/v1/tokens/{id}` | 所有者；撤销令牌 |
-| POST | `/api/admin/v1/uploads` | `asset.upload`；开分片会话 |
+| POST | `/api/admin/v1/uploads` | 新建内容要 `asset.upload`；带 `asset_id` 替换要 `asset.update` |
 | GET | `/api/admin/v1/uploads/{id}` | `asset.upload`；查会话状态与已收分片 |
-| PUT | `/api/admin/v1/uploads/{id}/parts/{n}` | `asset.upload`；写第 n 片（原始字节） |
-| POST | `/api/admin/v1/uploads/{id}/complete` | `asset.upload`；合并校验落盘，支持 `Idempotency-Key` |
-| DELETE | `/api/admin/v1/uploads/{id}` | `asset.upload`；放弃并删临时文件 |
-| POST | `/api/admin/v1/uploads/direct` | `asset.upload`；multipart 一次上传 |
+| PUT | `/api/admin/v1/uploads/{id}/parts/{n}` | 随会话：新建用 `asset.upload`，替换用 `asset.update` |
+| POST | `/api/admin/v1/uploads/{id}/complete` | 同上，完成时再查一次；支持 `Idempotency-Key` |
+| DELETE | `/api/admin/v1/uploads/{id}` | 同上；放弃并删临时文件 |
+| POST | `/api/admin/v1/uploads/direct` | 新建要 `asset.upload`；带 `asset_id` 要 `asset.update` |
+| GET | `/api/admin/v1/folders` | `asset.read`；按物化路径排序 |
+| POST | `/api/admin/v1/folders` | `folder.manage`；建目录 |
+| PATCH | `/api/admin/v1/folders/{id}` | `folder.manage`；改名（子孙路径同步） |
+| POST | `/api/admin/v1/folders/{id}/move` | `folder.manage`；移动（子孙跟着走） |
+| GET | `/api/admin/v1/tags` | `asset.read`；`q` 按名称筛选 |
+| POST | `/api/admin/v1/tags` | `tag.manage`；按名称取或建 |
+| GET | `/api/admin/v1/assets` | `asset.read`；游标分页与筛选 |
+| POST | `/api/admin/v1/assets` | `asset.upload`；直接创建 Markdown / 纯文本 |
+| GET | `/api/admin/v1/assets/{id}` | `asset.read`；含全部保留版本 |
+| PATCH | `/api/admin/v1/assets/{id}` | `asset.update`；改元数据、标签或正文，必须带 `revision` |
+
+替换文件没有单独接口：`POST /uploads` 或 `/uploads/direct` 带 `asset_id`，完成后追加为新版本。
+新建与替换共用一条上传路径，避免两套登记规则。
 
 错误格式固定为 `{"error":{"code":"...","message":"..."}}`，`code` 稳定（`unauthorized`、`forbidden`、
 `not_found`、`conflict`、`invalid`、`too_large`、`rate_limited`、`insufficient_storage` ……），`message` 是中文。
@@ -220,8 +243,68 @@ data/tmp/uploads/<session>/parts/000001.part   未完成的分片
 
 ### 完成上传之后
 
-第 3 部分到此为止：字节已经在 `originals/`，会话里留有 `asset_id`、`storage_key`、`kind`、`mime`、
-`sha256`、尺寸，但还没有 `assets` 行。登记、版本、发布分别是第 4、5 部分的事。
+字节在校验后落到 `originals/aa/<asset_id>/v<n>/original.ext`，同时登记成内容：
+`assets` 一行、`asset_versions` 一行，`current_version_id` 指向这一版。
+新建内容此时是 `draft` + `private`，还没有公开地址——发布是第 5 部分的事。
+
+## 内容与版本
+
+### 目录
+
+目录是给人浏览的树，与磁盘路径无关。内部一律用 `id`，`path` 是物化出来的展示路径
+（`/资料/2026`，根是 `/`）。改名与移动在同一事务里把子孙的 `path` 前缀一起换掉，
+所以列表排序与祖先判断都不需要递归查询。移动到自己或自己的子孙下面会被拒绝（422）。
+
+同一父目录下不能重名：非根目录用组合唯一约束，根目录用部分唯一索引
+（SQLite 的普通 UNIQUE 会把多个 NULL 当成不同值）。冲突返回 409。
+
+### 标签
+
+名称唯一，`slug` 由名称派生（空白与标点折叠成 `-`，中文原样保留；折叠后撞车自动加序号）。
+内容打标签只给名字：不存在的标签当场创建，调用方不需要先建后关联。
+
+### 内容
+
+七类内容都落在同一张 `assets` 表里，`kind` 区分。上传类内容由上传完成自动登记；
+Markdown 与纯文本可以不经上传直接创建，也可以直接改正文——正文的每一次修改都写成新版本，
+与上传共用同一套版本结构、保留规则与发布路径（企划第 8.4 节 T1）。
+
+`PATCH /assets/{id}` 的 `body` 字段只对 Markdown 与纯文本有效（其他类型返回 422，请替换文件）：
+
+* 新正文写入 `v(n+1)`，`current_version_id` 指过去，旧版本按保留规则淘汰；
+* Markdown 的 front matter 重新映射到 `title`、`slug`、`summary`、`language`、`cover`、`tags`；
+  同一请求里显式给出的字段优先，不会被正文里的 front matter 覆盖；
+* 正文里引用的图片重新解析，`asset_references` 随之更新。
+
+编辑中的字段（`title`、`summary`、`description`、`alt`、`language`、`slug`、`folder_id`、
+`cover_asset_id`、`visibility`）与发布快照（`published_*`）分列。第 4 部分只写前者，
+`published_version_id` 恒为空；PATCH 也不能写 `published_*`（未知字段直接 422，
+不会被静默忽略）。
+
+**Markdown 的 front matter** 会映射到内容字段：`title`、`slug`、`excerpt`/`summary`、
+`tags`、`cover`（可写内容 ID、`/p/<id>/...` 或 `asset:<id>`）。正文里引用的本库图片
+解析成内容 ID 记进 `asset_references`；外站地址与不存在的 ID 都不落库，等第 6 部分渲染时再处理。
+
+**封面** 只允许指向图片，否则 422。
+
+### 版本与权限
+
+替换文件 = 上传一个新文件并把它挂到已有内容上（`POST /uploads` 带 `asset_id`），
+完成后追加 `v(n+1)` 并把 `current_version_id` 指过去。
+
+**替换属于修改，不是上传**：建会话、写分片、完成、取消这几步都按会话是否带 `asset_id`
+判定所需能力——带 `asset_id` 要 `asset.update`，不带才要 `asset.upload`。
+只有上传权限的编辑可以创建新内容，但改不了已有文件的版本；完成时再查一次，
+所以会话建好之后被收回权限也挡住。
+
+`published_version_id` 不动，所以**没有发布权限的人替换文件，改不了访客看到的内容**
+（第 5 部分的发布才切换线上版本）。
+
+保留规则：图片与文档留最近 5 版，视频留 2 版；`current_version_id` 与
+`published_version_id` 指向的版本永远保留，即使它的版本号更旧。
+
+`revision` 是乐观锁：修改元数据必须带 `revision`，不一致返回 409。一次请求（无论改几个字段、
+是否同时改标签）只加 1；替换版本也加 1。
 
 ## 数据库
 
@@ -233,7 +316,8 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 共三条连接，写锁竞争可预测。只有 API 和 worker 打开库文件，网站只走 HTTP。
 
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
-`0001` 基线，`0002` 身份与会话六张表，`0003` 上传会话与幂等键。「至多一个所有者」用部分唯一索引在库层强制，
+`0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本。
+「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」都由库层约束兜底，
 不只靠应用代码。时间一律按 UTC 存不带时区的值。
 
 迁移用 Alembic，`render_as_batch=True`（SQLite 改表必须批处理）。新增迁移：
@@ -251,5 +335,5 @@ JSON 行输出到 stdout，由 systemd 收进 journald。`log.py` 会丢弃命�
 异常只保留类型与消息。日志里不写文件正文。
 
 审计写在 `audit_logs`：登录成功与失败、退出、建账号、权限变更、停用、改密码、建站点、签发与撤销令牌，
-以及上传的开始、完成、取消与失败。登录失败的记录里只有用户名和 IP，不记密码；上传记录里只有类型、
-字节数与哈希，不记文件正文。
+上传的开始、完成、取消与失败，以及建目录、改名、移动、建标签、内容登记、元数据修改、版本追加与淘汰。
+登录失败的记录里只有用户名和 IP，不记密码；上传与内容记录里只有类型、字节数与哈希，不记文件正文。

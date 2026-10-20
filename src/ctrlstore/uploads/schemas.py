@@ -10,10 +10,15 @@ from ..models import UploadSession
 
 
 class CreateUploadRequest(BaseModel):
-    """开一个上传会话。``filename`` 的扩展名决定类型与大小上限。"""
+    """开一个上传会话。``filename`` 的扩展名决定类型与大小上限。
+
+    ``asset_id`` 有值时表示给这条内容替换文件：完成后追加为新版本，
+    线上版本（第 5 部分发布后才有值）保持不变。
+    """
 
     filename: str = Field(min_length=1, max_length=255)
     content_type: str | None = Field(default=None, max_length=128)
+    asset_id: str | None = Field(default=None, description="要替换的内容 ID")
 
 
 class UploadSessionOut(BaseModel):

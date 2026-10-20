@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import os
 import shutil
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +149,23 @@ class LocalStorage:
         destination = self.original_path(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, destination)
+        return destination
+
+    def write_original(self, data: bytes, key: str) -> Path:
+        """直接把内存里的字节写成原件（直接创建的 Markdown / 纯文本）。
+
+        先写临时文件再改名，和上传一样不会留下半个文件。
+        """
+        destination = self.original_path(key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = self.tmp_dir / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging = staging_dir / f"{uuid.uuid4().hex}.tmp"
+        try:
+            staging.write_bytes(data)
+            os.replace(staging, destination)
+        finally:
+            staging.unlink(missing_ok=True)
         return destination
 
     def hash_file(self, path: Path) -> tuple[str, int]:

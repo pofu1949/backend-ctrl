@@ -24,6 +24,9 @@ TARGET_USER = "user"
 TARGET_SITE = "site"
 TARGET_TOKEN = "token"
 TARGET_UPLOAD = "upload"
+TARGET_FOLDER = "folder"
+TARGET_TAG = "tag"
+TARGET_ASSET = "asset"
 
 #: 已知动作。集中列出，避免日志和界面里出现拼错的动作名。
 LOGIN = "login"
@@ -40,6 +43,14 @@ UPLOAD_CREATED = "upload_created"
 UPLOAD_COMPLETED = "upload_completed"
 UPLOAD_CANCELLED = "upload_cancelled"
 UPLOAD_FAILED = "upload_failed"
+FOLDER_CREATED = "folder_created"
+FOLDER_RENAMED = "folder_renamed"
+FOLDER_MOVED = "folder_moved"
+TAG_CREATED = "tag_created"
+ASSET_CREATED = "asset_created"
+ASSET_UPDATED = "asset_updated"
+ASSET_VERSION_ADDED = "asset_version_added"
+ASSET_VERSION_PRUNED = "asset_version_pruned"
 
 
 def record(

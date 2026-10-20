@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -230,3 +231,203 @@ class IdempotencyKey(Base):
     response_status: Mapped[int] = mapped_column(Integer)
     response_body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+# —— 内容状态与可见性（企划第 8.6 节）——
+ASSET_DRAFT = "draft"
+ASSET_PUBLISHED = "published"
+ASSET_ARCHIVED = "archived"
+ASSET_TRASHED = "trashed"
+ASSET_STATUSES = (ASSET_DRAFT, ASSET_PUBLISHED, ASSET_ARCHIVED, ASSET_TRASHED)
+
+VISIBILITY_PRIVATE = "private"
+VISIBILITY_SITE = "site"
+VISIBILITY_UNLISTED = "unlisted"
+VISIBILITY_PUBLIC = "public"
+VISIBILITIES = (VISIBILITY_PRIVATE, VISIBILITY_SITE, VISIBILITY_UNLISTED, VISIBILITY_PUBLIC)
+
+#: 抽取状态。第 4 部分只用到 pending；第 9 部分填 ready/failed/skipped。
+EXTRACT_PENDING = "pending"
+EXTRACT_READY = "ready"
+EXTRACT_FAILED = "failed"
+EXTRACT_SKIPPED = "skipped"
+
+#: 视频是否可播放。第 9 部分用 ffprobe 判定，其余类型为空。
+PLAYBACK_PLAYABLE = "playable"
+PLAYBACK_DOWNLOAD_ONLY = "download_only"
+
+#: 不进入任何列表的最终状态。
+VISIBLE_STATUSES = (ASSET_DRAFT, ASSET_PUBLISHED, ASSET_ARCHIVED)
+
+
+class Folder(Base):
+    """目录树。``path`` 是物化路径，例如 ``/资料/2026``，根目录为 ``/``。
+
+    路径只用于展示和祖先判断；权限与移动都以 ``id`` 为准。
+    """
+
+    __tablename__ = "folders"
+    __table_args__ = (
+        # 非根目录：同一父目录下名称唯一。
+        UniqueConstraint("parent_id", "name", name="ux_folder_parent_name"),
+        # 根目录：parent_id 为空时，普通 UNIQUE 不把多个 NULL 视为重复，需要部分索引。
+        Index(
+            "ux_folder_root_name",
+            "name",
+            unique=True,
+            sqlite_where=text("parent_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="RESTRICT"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    path: Mapped[str] = mapped_column(String(1024), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    #: 父目录。移动与改路径都要读它，直接联表取，避免再次查询。
+    parent: Mapped[Folder | None] = relationship(remote_side="Folder.id", lazy="joined")
+
+    @property
+    def is_root(self) -> bool:
+        return self.path == ROOT_PATH
+
+
+#: 根目录的物化路径。目录本身不以 ``/`` 结尾，根目录是唯一例外。
+ROOT_PATH = "/"
+
+
+class Tag(Base):
+    """标签。名称唯一，``slug`` 由名称派生，用于 URL 与筛选。"""
+
+    __tablename__ = "tags"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    slug: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Asset(Base):
+    """一条内容。
+
+    编辑中的字段（``title`` 等）与已发布快照（``published_*``）分列：
+    只有发布才写快照，公开接口只读快照（第 5、6 部分）。
+    """
+
+    __tablename__ = "assets"
+    __table_args__ = (
+        Index("ix_assets_created", "created_at", "id"),
+        Index("ix_assets_kind_status", "kind", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(16))
+    folder_id: Mapped[str | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    #: 只在已发布的文本内容中唯一（第 6 部分按别名取文本）。
+    slug: Mapped[str | None] = mapped_column(String(128), index=True)
+
+    # —— 编辑中的字段 ——
+    title: Mapped[str] = mapped_column(String(255), default="")
+    summary: Mapped[str] = mapped_column(String(1024), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    alt: Mapped[str] = mapped_column(String(512), default="")
+    language: Mapped[str] = mapped_column(String(16), default="zh-CN")
+
+    status: Mapped[str] = mapped_column(String(16), default=ASSET_DRAFT, index=True)
+    visibility: Mapped[str] = mapped_column(String(16), default=VISIBILITY_PRIVATE)
+    #: 只允许指向图片内容；不设外键，删除顺序由代码保证。
+    cover_asset_id: Mapped[str | None] = mapped_column(String(36))
+
+    #: 最新保存的版本，可能尚未公开。
+    current_version_id: Mapped[str | None] = mapped_column(String(36))
+    #: 线上版本。第 4 部分恒为空，第 5 部分发布后才有值。
+    published_version_id: Mapped[str | None] = mapped_column(String(36))
+
+    # —— 发布快照（第 5 部分写入）——
+    published_title: Mapped[str | None] = mapped_column(String(255))
+    published_summary: Mapped[str | None] = mapped_column(String(1024))
+    published_cover_asset_id: Mapped[str | None] = mapped_column(String(36))
+    #: 发布当时的标签名，JSON 数组文本。
+    published_tags: Mapped[str | None] = mapped_column(Text)
+
+    #: 乐观锁：每次写入加 1，请求里的值不一致就 409。
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    #: 少量扩展字段，不替代正式列。
+    custom: Mapped[str | None] = mapped_column(Text)
+
+    versions: Mapped[list[AssetVersion]] = relationship(
+        back_populates="asset",
+        cascade="all, delete-orphan",
+        order_by="AssetVersion.version_no",
+        lazy="selectin",
+    )
+    tags: Mapped[list[Tag]] = relationship(secondary="asset_tags", lazy="selectin")
+
+    @property
+    def is_trashed(self) -> bool:
+        return self.status == ASSET_TRASHED
+
+
+class AssetVersion(Base):
+    """一次字节快照。写入后不再改变；替换只会产生新行。"""
+
+    __tablename__ = "asset_versions"
+    __table_args__ = (UniqueConstraint("asset_id", "version_no", name="ux_asset_version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    original_filename: Mapped[str] = mapped_column(String(255))
+    mime: Mapped[str] = mapped_column(String(128))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    #: 相对键，由服务端生成；禁止绝对路径。
+    storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    #: 有上限的抽取文本，第 9 部分填写。
+    text_extract: Mapped[str | None] = mapped_column(Text)
+    text_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    extract_status: Mapped[str] = mapped_column(String(16), default=EXTRACT_PENDING)
+    playback: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    asset: Mapped[Asset] = relationship(back_populates="versions")
+
+
+class AssetTag(Base):
+    """内容与标签的多对多。"""
+
+    __tablename__ = "asset_tags"
+    __table_args__ = (UniqueConstraint("asset_id", "tag_id", name="ux_asset_tag"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    tag_id: Mapped[str] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), index=True)
+
+
+class AssetReference(Base):
+    """Markdown 正文里引用的本库图片。发布时据此检查图片是否已发布。"""
+
+    __tablename__ = "asset_references"
+    __table_args__ = (UniqueConstraint("from_asset_id", "to_asset_id", name="ux_asset_reference"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    from_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), index=True
+    )
+    to_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), index=True
+    )

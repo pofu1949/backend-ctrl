@@ -22,12 +22,13 @@ from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.orm import sessionmaker
 
 from . import __version__
+from .assets import service as asset_service
 from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
 from .db import create_engine, run_migrations
 from .errors import ApiError
 from .log import configure_logging
-from .models import User, utcnow
+from .models import Asset, User, utcnow
 from .storage import LocalStorage
 from .uploads import service as upload_service
 
@@ -70,6 +71,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     upload = subcommands.add_parser("import", help="从服务器本地路径导入文件")
     upload.add_argument("path", type=Path, help="要导入的文件路径")
+    upload.add_argument(
+        "--asset-id", default=None, help="要替换的内容 ID；给了就作为该内容的新版本"
+    )
     upload.set_defaults(handler=_cmd_import)
 
     _build_user_commands(subcommands)
@@ -410,7 +414,12 @@ def _cmd_import(args: argparse.Namespace) -> int:
     with _session(settings) as db:
         owner = _actor(db)
         session = upload_service.import_file(
-            db, settings=settings, storage=storage, actor=owner, path=path
+            db,
+            settings=settings,
+            storage=storage,
+            actor=owner,
+            path=path,
+            target_asset_id=args.asset_id,
         )
         print(f"已导入：{path.name}")
         print(f"类型：{session.kind}（{session.mime}）")
@@ -418,6 +427,10 @@ def _cmd_import(args: argparse.Namespace) -> int:
         print(f"SHA-256：{session.sha256}")
         print(f"内容 ID：{session.asset_id}")
         print(f"存储键：{session.storage_key}")
+        if args.asset_id:
+            asset = db.get(Asset, session.asset_id)
+            version = asset_service.current_version(asset)
+            print(f"当前版本：v{version.version_no if version else '-'}，revision {asset.revision}")
         duplicate = upload_service.duplicate_of(db, session)
         if duplicate:
             print(f"提示：库中已有相同字节的上传（{duplicate}）")

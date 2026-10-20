@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, File, Path, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Path, Request, UploadFile
 from sqlalchemy.orm import Session as DbSession
 
 from .. import idempotency
@@ -32,10 +32,17 @@ CHUNK = 1024 * 1024
 def create_upload(
     request: Request,
     payload: CreateUploadRequest,
-    principal: deps.Principal = Depends(deps.require_permission("asset.upload")),
+    principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> UploadSessionOut:
-    """开一个分片会话。返回的 ``byte_limit`` 是该类型的单文件上限。"""
+    """开一个分片会话。返回的 ``byte_limit`` 是该类型的单文件上限。
+
+    带 ``asset_id`` 时是替换：要 ``asset.update``，完成后追加版本，线上版本不变。
+    不带则是新建内容，要 ``asset.upload``。
+    """
+    deps.ensure_permission(
+        principal, service.REPLACE_PERMISSION if payload.asset_id else service.CREATE_PERMISSION
+    )
     settings = _settings(request)
     session = service.create_session(
         db,
@@ -44,6 +51,7 @@ def create_upload(
         actor=principal.user,
         filename=payload.filename,
         declared_type=payload.content_type,
+        target_asset_id=payload.asset_id,
     )
     return UploadSessionOut.of(session)
 
@@ -72,7 +80,7 @@ async def put_part(
     request: Request,
     upload_id: str,
     index: int = Path(ge=1, le=100_000, description="分片序号，从 1 开始连续"),
-    principal: deps.Principal = Depends(deps.require_permission("asset.upload")),
+    principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> UploadSessionOut:
     """写入一片。同一序号重复提交就覆盖，因此断点续传不需要额外协议。
@@ -83,6 +91,7 @@ async def put_part(
     settings = _settings(request)
     storage = LocalStorage.from_settings(settings)
     session = service.get_session(db, upload_id, actor=principal.user)
+    deps.ensure_permission(principal, service.required_permission(session))
     service.ensure_writable(db, storage=storage, session=session)
 
     try:
@@ -100,12 +109,16 @@ async def put_part(
 def complete_upload(
     request: Request,
     upload_id: str,
-    principal: deps.Principal = Depends(deps.require_permission("asset.upload")),
+    principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> UploadSessionOut:
-    """合并并校验。支持 ``Idempotency-Key``：网络重试不会产生第二份原件。"""
+    """合并并校验。支持 ``Idempotency-Key``：网络重试不会产生第二份原件。
+
+    权限在这里再查一次：会话建好之后被收回权限，也不能靠「已经拿到会话」完成替换。
+    """
     settings = _settings(request)
     session = service.get_session(db, upload_id, actor=principal.user)
+    deps.ensure_permission(principal, service.required_permission(session))
 
     key = request.headers.get(idempotency.HEADER)
     request_hash = idempotency.hash_request(f"{upload_id}:{session.byte_limit}")
@@ -146,12 +159,13 @@ def complete_upload(
 def cancel_upload(
     request: Request,
     upload_id: str,
-    principal: deps.Principal = Depends(deps.require_permission("asset.upload")),
+    principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> None:
     """放弃上传并删除临时文件。"""
     settings = _settings(request)
     session = service.get_session(db, upload_id, actor=principal.user)
+    deps.ensure_permission(principal, service.required_permission(session))
     service.cancel(db, storage=LocalStorage.from_settings(settings), session=session)
 
 
@@ -159,10 +173,17 @@ def cancel_upload(
 def direct_upload(
     request: Request,
     file: UploadFile = File(..., description="要入库的文件"),
-    principal: deps.Principal = Depends(deps.require_permission("asset.upload")),
+    asset_id: str | None = Form(default=None, description="要替换的内容 ID"),
+    principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> UploadSessionOut:
-    """一次性上传。内部走会话 + 单分片 + 完成的同一条路径，不另写登记规则。"""
+    """一次性上传。内部走会话 + 单分片 + 完成的同一条路径，不另写登记规则。
+
+    带 ``asset_id`` 是替换，要 ``asset.update``；否则是新建，要 ``asset.upload``。
+    """
+    deps.ensure_permission(
+        principal, service.REPLACE_PERMISSION if asset_id else service.CREATE_PERMISSION
+    )
     settings = _settings(request)
     session = service.direct_upload(
         db,
@@ -172,6 +193,7 @@ def direct_upload(
         filename=file.filename or "",
         declared_type=file.content_type,
         chunks=_file_chunks(file),
+        target_asset_id=asset_id,
     )
     return UploadSessionOut.of(session, duplicate_of=service.duplicate_of(db, session))
 

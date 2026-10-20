@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
 
 from .. import audit, idempotency
+from ..assets import service as assets
 from ..config import Settings
 from ..errors import ApiError
 from ..health import disk_usage
@@ -32,10 +33,9 @@ from ..models import (
     UPLOAD_RECEIVING,
     UploadSession,
     User,
-    new_id,
     utcnow,
 )
-from ..storage import LocalStorage, TooLarge, keys
+from ..storage import LocalStorage, TooLarge
 from . import inspection
 
 #: 未完成会话的存活时间（企划第 8.3 节 U3）。
@@ -44,6 +44,20 @@ SESSION_TTL_HOURS = 24
 #: 同时未完成的会话数上限：每名用户 2 个，全库 4 个。
 MAX_OPEN_PER_USER = 2
 MAX_OPEN_GLOBAL = 4
+
+#: 新建内容需要的能力。
+CREATE_PERMISSION = "asset.upload"
+#: 替换已有文件属于修改（企划第 8.6 节），不是上传。
+REPLACE_PERMISSION = "asset.update"
+
+
+def required_permission(session: UploadSession) -> str:
+    """这次上传需要哪项能力。
+
+    会话带 ``asset_id`` 就是替换：它写的是已有内容的新版本，因此要 ``asset.update``。
+    只有上传权限的编辑不能借替换改掉别人的内容。
+    """
+    return REPLACE_PERMISSION if session.asset_id else CREATE_PERMISSION
 
 
 def create_session(
@@ -54,8 +68,13 @@ def create_session(
     actor: User,
     filename: str,
     declared_type: str | None,
+    target_asset_id: str | None = None,
 ) -> UploadSession:
-    """开一个上传会话。此时只做轻量检查，类型要等完成后按文件头确认。"""
+    """开一个上传会话。
+
+    ``target_asset_id`` 为空表示上传一条新内容；有值表示给那条内容替换文件，
+    完成后由 ``assets.service`` 追加成新版本。
+    """
     # 清理先落库：后面若因磁盘或并发上限被拒，这些已作废的会话不该跟着回滚。
     if expire_stale(db, storage=storage):
         db.commit()
@@ -63,9 +82,12 @@ def create_session(
 
     kind, _ = _kind_or_invalid(filename)
     _ensure_slot_available(db, actor)
+    if target_asset_id:
+        _ensure_target_replaceable(db, target_asset_id, kind=kind)
 
     session = UploadSession(
         actor_id=actor.id,
+        asset_id=target_asset_id,
         original_filename=_trim_filename(filename),
         content_type=(declared_type or "").strip() or None,
         kind=kind,
@@ -84,9 +106,26 @@ def create_session(
         action=audit.UPLOAD_CREATED,
         target_type=audit.TARGET_UPLOAD,
         target_id=session.id,
-        detail={"filename": session.original_filename, "kind": kind},
+        detail={
+            "filename": session.original_filename,
+            "kind": kind,
+            "target_asset_id": target_asset_id,
+        },
     )
     return session
+
+
+def _ensure_target_replaceable(db: DbSession, asset_id: str, *, kind: str) -> None:
+    """替换目标要存在、可用，且类型一致——图片不能替换成视频。"""
+    from ..models import ASSET_TRASHED, Asset
+
+    asset = db.get(Asset, asset_id)
+    if asset is None:
+        raise ApiError.not_found("要替换的内容不存在")
+    if asset.status == ASSET_TRASHED:
+        raise ApiError.conflict("回收站中的内容不能替换文件")
+    if asset.kind != kind:
+        raise ApiError.invalid(f"新文件是 {kind}，与内容的 {asset.kind} 不一致")
 
 
 def add_part(
@@ -157,22 +196,31 @@ def complete(
         )
         _ensure_capacity(settings)
 
-        asset_id = new_id()
-        storage_key = keys.build(asset_id, 1, result.extension)
-        storage.store_original(merged, storage_key)
+        # 登记与落盘一起完成：新内容或该内容的新版本，规则都在 assets.service。
+        asset, version = assets.register_upload(
+            db,
+            settings=settings,
+            storage=storage,
+            session=session,
+            merged=merged,
+            inspection=result,
+        )
     except inspection.RejectedFile as exc:
         _fail(db, storage, session, message=str(exc))
         raise ApiError.invalid(str(exc)) from exc
+    except ApiError:
+        _fail(db, storage, session, message="登记内容失败")
+        raise
     except Exception as exc:  # 合并或落盘失败：留下可追溯的失败状态
         _fail(db, storage, session, message=f"上传处理失败：{exc}")
         raise
 
-    session.asset_id = asset_id
+    session.asset_id = asset.id
     session.kind = result.kind
     session.mime = result.mime
     session.sha256 = result.sha256
     session.byte_size = result.byte_size
-    session.storage_key = storage_key
+    session.storage_key = version.storage_key
     session.width = result.width
     session.height = result.height
     session.status = UPLOAD_READY
@@ -200,6 +248,7 @@ def direct_upload(
     filename: str,
     declared_type: str | None,
     chunks: Iterable[bytes],
+    target_asset_id: str | None = None,
 ) -> UploadSession:
     """一次性上传：复用会话与完成逻辑，不另写一套登记规则。"""
     session = create_session(
@@ -209,6 +258,7 @@ def direct_upload(
         actor=actor,
         filename=filename,
         declared_type=declared_type,
+        target_asset_id=target_asset_id,
     )
     try:
         add_part(db, storage=storage, session=session, index=1, chunks=chunks)
@@ -278,10 +328,12 @@ def import_file(
     storage: LocalStorage,
     actor: User,
     path: Path,
+    target_asset_id: str | None = None,
 ) -> UploadSession:
     """从服务器本地路径导入（企划第 8.3 节 U8）。
 
     免去「先下载到个人电脑再上传」，但仍然走同一套会话、校验与落盘规则。
+    ``target_asset_id`` 有值时作为该内容的新版本导入。
     """
     if not path.is_file():
         raise ApiError.not_found(f"文件不存在：{path}")
@@ -298,6 +350,7 @@ def import_file(
         actor=actor,
         filename=path.name,
         declared_type=None,
+        target_asset_id=target_asset_id,
     )
     try:
         add_part(db, storage=storage, session=session, index=1, chunks=_file_chunks(path))
