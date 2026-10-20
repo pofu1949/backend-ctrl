@@ -1,0 +1,283 @@
+"""配置。
+
+配置分成两层：
+
+* 非机密项（路径、阈值、公开基址）写在 TOML 里，默认路径 ``/etc/ctrlstore/config.toml``。
+* 机密项（会话密钥、访客哈希密钥）只来自环境变量或 root 只读的密钥文件。
+
+环境变量优先于 TOML；同名变量加前缀 ``CTRLSTORE_``，例如 ``CTRLSTORE_DATA_DIR``。
+主配置 TOML 里出现机密项会被拒绝，避免密钥随配置一起进入版本库或备份。
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import tomllib
+from pathlib import Path
+from typing import Any, cast
+from urllib.parse import urlsplit
+
+from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+GiB = 1024**3
+
+#: 配置文件的默认位置。
+DEFAULT_CONFIG_PATH = Path("/etc/ctrlstore/config.toml")
+
+#: 配置项的环境变量前缀。
+ENV_PREFIX = "CTRLSTORE_"
+
+#: 指定配置文件路径的环境变量。
+ENV_CONFIG_PATH = f"{ENV_PREFIX}CONFIG"
+
+#: 指定密钥文件路径的环境变量。
+ENV_SECRETS_PATH = f"{ENV_PREFIX}SECRETS_FILE"
+
+#: 只允许来自环境变量或独立密钥文件的机密项。
+SECRET_FIELDS = ("session_secret", "pageview_hmac_secret")
+
+#: 机密项的最小长度（字符）。
+MIN_SECRET_LENGTH = 32
+
+SECRETS_TABLE = "secrets"
+
+#: 是否 POSIX。密钥文件权限只有 POSIX 有语义，单列出来便于测试覆盖。
+IS_POSIX = os.name == "posix"
+
+
+class ConfigError(RuntimeError):
+    """配置不完整、不可读或存在安全问题时抛出，进程不应带着它启动。"""
+
+
+class Settings(BaseSettings):
+    """运行期配置。字段默认值即是部署基线（见企划第 17.4 节）。"""
+
+    model_config = SettingsConfigDict(
+        env_prefix=ENV_PREFIX,
+        extra="ignore",
+        validate_default=True,
+    )
+
+    # —— 路径 ——
+    data_dir: Path = Path("/var/lib/ctrlstore")
+    database_path: Path | None = None
+    originals_dir: Path | None = None
+    derivatives_dir: Path | None = None
+    public_dir: Path | None = None
+    tmp_dir: Path | None = None
+
+    # —— 对外地址 ——
+    public_base_url: str = "http://127.0.0.1:8000"
+
+    # —— 健康阈值 ——
+    min_free_bytes: int = 10 * GiB
+    min_free_ratio: float = 0.05
+    min_available_memory_bytes: int = 1 * GiB
+
+    # —— 进程 ——
+    log_level: str = "INFO"
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+
+    # —— 机密项 ——
+    session_secret: str = Field(repr=False)
+    pageview_hmac_secret: str = Field(repr=False)
+
+    # —— 来源，便于日志和排错 ——
+    secrets_file: Path | None = Field(default=None, exclude=True)
+    config_path: Path | None = Field(default=None, exclude=True)
+
+    @field_validator(
+        "data_dir",
+        "database_path",
+        "originals_dir",
+        "derivatives_dir",
+        "public_dir",
+        "tmp_dir",
+    )
+    @classmethod
+    def _absolute_path(cls, value: Path | None) -> Path | None:
+        """拒绝相对路径：数据目录不应随进程工作目录漂移。"""
+        if value is not None and not value.is_absolute():
+            raise ValueError("必须是绝对路径")
+        return value
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _valid_base_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError("必须是 http(s) 绝对地址")
+        if parts.query or parts.fragment:
+            raise ValueError("不能带查询串或片段")
+        return value.rstrip("/")
+
+    @field_validator("min_free_ratio")
+    @classmethod
+    def _ratio_in_range(cls, value: float) -> float:
+        if not 0 < value < 1:
+            raise ValueError("必须在 0 与 1 之间")
+        return value
+
+    @field_validator("log_level")
+    @classmethod
+    def _known_level(cls, value: str) -> str:
+        level = value.upper()
+        if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("未知日志级别")
+        return level
+
+    @field_validator(*SECRET_FIELDS)
+    @classmethod
+    def _strong_secret(cls, value: str) -> str:
+        if len(value) < MIN_SECRET_LENGTH:
+            raise ValueError(f"至少 {MIN_SECRET_LENGTH} 个字符")
+        return value
+
+    @model_validator(mode="after")
+    def _fill_directories(self) -> Settings:
+        """未单独指定的目录都落在 ``data_dir`` 下。"""
+        defaults = {
+            "database_path": self.data_dir / "ctrlstore.db",
+            "originals_dir": self.data_dir / "originals",
+            "derivatives_dir": self.data_dir / "derivatives",
+            "public_dir": self.data_dir / "public",
+            "tmp_dir": self.data_dir / "tmp",
+        }
+        for name, fallback in defaults.items():
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, fallback)
+        return self
+
+    @property
+    def db_path(self) -> Path:
+        """元数据库文件。值由 :meth:`_fill_directories` 补齐，这里只做类型收窄。"""
+        return cast(Path, self.database_path)
+
+    @property
+    def db_url(self) -> str:
+        """SQLAlchemy 连接串。SQLite 路径用正斜杠，Windows 与 POSIX 一致。"""
+        return f"sqlite:///{self.db_path.as_posix()}"
+
+    def managed_directories(self) -> tuple[Path, ...]:
+        """``init`` 负责创建的目录。数据库文件在 ``data_dir`` 内一并创建。"""
+        return (
+            self.data_dir,
+            cast(Path, self.originals_dir),
+            cast(Path, self.derivatives_dir),
+            cast(Path, self.public_dir),
+            cast(Path, self.tmp_dir),
+        )
+
+
+def load_settings(config_path: Path | str | None = None) -> Settings:
+    """读取配置并校验。
+
+    优先级：环境变量 > 密钥文件 > 主配置 TOML > 字段默认值。
+    任何缺失或非法都抛 :class:`ConfigError`，由调用方让进程启动失败。
+
+    显式给出的路径（参数或 ``CTRLSTORE_CONFIG``）必须存在：写错路径时静默退回默认值，
+    会让服务在错误的目录上启动。只有隐式的默认路径允许不存在。
+    """
+    explicit = config_path is not None or ENV_CONFIG_PATH in os.environ
+    path = Path(config_path or os.environ.get(ENV_CONFIG_PATH, DEFAULT_CONFIG_PATH))
+    values = _read_config_file(path, required=explicit)
+    values.update(_read_secrets_file(values.get("secrets_file"), config_path=path))
+    values.update(_read_environment(Settings))
+    values["config_path"] = path
+
+    try:
+        return Settings(**values)
+    except ValidationError as exc:
+        raise ConfigError(_format_validation_error(exc, path)) from exc
+
+
+def _read_environment(settings_cls: type[Settings]) -> dict[str, Any]:
+    """按字段名收集显式设置的环境变量。"""
+    collected: dict[str, Any] = {}
+    for name in settings_cls.model_fields:
+        raw = os.environ.get(f"{ENV_PREFIX}{name.upper()}")
+        if raw is not None:
+            collected[name] = raw
+    return collected
+
+
+def _read_config_file(path: Path, *, required: bool) -> dict[str, Any]:
+    """读取主配置 TOML。显式指定时必须存在，隐式默认路径可以缺失。"""
+    values = _load_toml(path, required=required)
+    leaked = sorted(set(values) & set(SECRET_FIELDS))
+    if leaked:
+        raise ConfigError(
+            f"{path} 含机密项 {', '.join(leaked)}；请改用环境变量或 secrets_file 指向的密钥文件"
+        )
+    return values
+
+
+def _read_secrets_file(secrets_file: Any, *, config_path: Path) -> dict[str, Any]:
+    """读取密钥文件。密钥表可嵌在 ``[secrets]`` 下，也可直接写在顶层。
+
+    相对路径按主配置所在目录解析，便于把两份文件放在同一目录里。
+    """
+    if not secrets_file:
+        return {}
+    path = Path(secrets_file)
+    if not path.is_absolute():
+        path = config_path.parent / path
+    _ensure_private_permissions(path)
+    values = _load_toml(path, required=True)
+    nested = values.get(SECRETS_TABLE)
+    if isinstance(nested, dict):
+        values = {**values, **nested}
+    return {key: values[key] for key in SECRET_FIELDS if key in values}
+
+
+def _load_toml(path: Path, *, required: bool) -> dict[str, Any]:
+    if not path.exists():
+        if required:
+            raise ConfigError(f"配置文件不存在：{path}")
+        return {}
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"无法读取配置：{path}（{exc}）") from exc
+    try:
+        # 允许 UTF-8 BOM：用 Windows 编辑器改配置时很常见，tomllib 不接受它。
+        return tomllib.loads(raw.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"配置不是 UTF-8：{path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"配置不是合法的 TOML：{path}（{exc}）") from exc
+
+
+def _ensure_private_permissions(path: Path) -> None:
+    """密钥文件不能对同组和其他用户可读。Windows 无此语义，跳过。"""
+    if not IS_POSIX:
+        return
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise ConfigError(f"无法检查密钥文件权限：{path}（{exc}）") from exc
+    require_private_mode(mode, path)
+
+
+def require_private_mode(mode: int, path: Path) -> None:
+    """检查权限位。单独成函数，便于不依赖真实文件权限来测试。"""
+    if mode & 0o077:
+        raise ConfigError(f"密钥文件权限过宽（{mode:o}）：{path} 应为 0600")
+
+
+def _format_validation_error(exc: ValidationError, path: Path) -> str:
+    """把 pydantic 的报错整理成一行一项的中文提示。"""
+    lines = [f"配置校验失败（{path}）："]
+    for error in exc.errors():
+        field = ".".join(str(part) for part in error["loc"]) or "配置"
+        lines.append(f"  - {field}: {error['msg']}")
+    missing = [
+        e for e in exc.errors() if e["type"] == "missing" and str(e["loc"][-1]) in SECRET_FIELDS
+    ]
+    if missing:
+        names = ", ".join(f"{ENV_PREFIX}{str(e['loc'][-1]).upper()}" for e in missing)
+        lines.append(f"  机密项需来自环境变量（{names}）或 secrets_file")
+    return "\n".join(lines)

@@ -1,0 +1,23 @@
+# 虚拟环境与本地工具链（按需重建）
+.venv/
+.tools/
+
+# Python 编译产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 测试与检查缓存
+.pytest_cache/
+.ruff_cache/
+
+# 运行期数据绝不进版本库
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# 本地临时脚本
+scratch/

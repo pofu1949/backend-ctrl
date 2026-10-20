@@ -1,0 +1,35 @@
+# CtrlStore 配置示例。
+# 复制到 /etc/ctrlstore/config.toml 后按部署环境修改；权限 0640，属主 ctrlstore。
+#
+# 机密项（session_secret、pageview_hmac_secret）不写在这里：
+# 它们只来自环境变量，或下面 secrets_file 指向的 0600 文件。写在这里会被拒绝启动。
+
+# —— 路径 ——
+# 数据目录必须可配置：磁盘容量与是否独立挂载尚未确定（企划第 23 章 Q1）。
+data_dir = "/var/lib/ctrlstore"
+
+# 以下路径默认都落在 data_dir 下，需要单独挂载时再逐项覆盖。
+# database_path = "/var/lib/ctrlstore/ctrlstore.db"
+# originals_dir = "/var/lib/ctrlstore/originals"
+# derivatives_dir = "/var/lib/ctrlstore/derivatives"
+# public_dir = "/var/lib/ctrlstore/public"
+# tmp_dir = "/var/lib/ctrlstore/tmp"
+
+# —— 对外地址 ——
+# 备案前用实际入口，例如局域网地址；备案后只改这一项，内容 ID 不变。
+public_base_url = "http://127.0.0.1:8000"
+
+# —— 健康阈值 ——
+# 剩余空间低于 10 GB 或低于总容量 5% 即视为 degraded，并拒绝新的上传。
+min_free_bytes = 10737418240
+min_free_ratio = 0.05
+min_available_memory_bytes = 1073741824
+
+# —— 进程 ——
+log_level = "INFO"
+api_host = "127.0.0.1"
+api_port = 8000
+
+# —— 密钥文件 ——
+# 相对路径按本配置文件所在目录解析。权限必须是 0600。
+# secrets_file = "/etc/ctrlstore/secrets.toml"
