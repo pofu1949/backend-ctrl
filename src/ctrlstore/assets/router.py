@@ -1,7 +1,7 @@
 """内容接口 ``/api/admin/v1/assets``。
 
-这里只做管理视图：编辑中的字段、全部保留版本、标签。公开读取（只读发布快照）
-在第 6 部分实现。
+管理视图：编辑中的字段、全部保留版本、标签，以及发布/撤回/归档/回收站。
+公开读取（只读发布快照）在第 6 部分实现。
 
 **替换文件不用单独接口**：`POST /uploads` 带 `asset_id` 建会话，完成后自动追加版本。
 新建与替换共用一条上传路径，避免出现两套登记规则（企划第 13.1 节的两处入口在这里合并）。
@@ -9,21 +9,37 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session as DbSession
 
 from ..auth import deps
+from ..errors import ApiError
+from ..models import ASSET_PUBLISHED
 from ..storage import LocalStorage
-from . import service
+from . import download, publish, service, signing
 from .schemas import (
     AssetDetailOut,
     AssetListOut,
     AssetOut,
     CreateTextAssetRequest,
+    SignedUrlOut,
     UpdateAssetRequest,
+    VersionActionRequest,
 )
 
 router = APIRouter(tags=["assets"])
+
+
+def _settings(request: Request):
+    return request.app.state.settings
+
+
+def _storage(request: Request) -> LocalStorage:
+    return LocalStorage.from_settings(_settings(request))
+
+
+def _detail(asset) -> AssetDetailOut:
+    return AssetDetailOut.detailed(asset, current=service.current_version(asset))
 
 
 @router.get("/assets", response_model=AssetListOut)
@@ -85,8 +101,7 @@ def read_asset(
     _: deps.Principal = Depends(deps.require_permission("asset.read")),
     db: DbSession = Depends(deps.get_db),
 ) -> AssetDetailOut:
-    asset = service.get_asset(db, asset_id)
-    return AssetDetailOut.detailed(asset, current=service.current_version(asset))
+    return _detail(service.get_asset(db, asset_id))
 
 
 @router.patch("/assets/{asset_id}", response_model=AssetDetailOut)
@@ -100,18 +115,178 @@ def update_asset(
     """改元数据、标签或正文。``revision`` 不一致返回 409，提示重新读取。
 
     ``body`` 只对 Markdown 与纯文本有效，会写成新版本（企划第 8.4 节 T1）。
-    只改编辑中的内容：线上快照要等发布（第 5 部分），所以有修改权限而没有发布权限的人
+    只改编辑中的内容：线上快照要等发布，所以有修改权限而没有发布权限的人
     改不动访客看到的内容。
+
+    已发布内容改可见性会改变「是否对外」，因此额外要求 ``asset.publish``。
     """
-    settings = request.app.state.settings
+    settings = _settings(request)
+    storage = _storage(request)
     asset = service.get_asset(db, asset_id)
+    if payload.visibility is not None and asset.status == ASSET_PUBLISHED:
+        deps.ensure_permission(principal, "asset.publish")
+
     service.apply_update(
         db,
         settings=settings,
-        storage=LocalStorage.from_settings(settings),
+        storage=storage,
         asset=asset,
         update=service.Update(changes=payload.changes(), tags=payload.tags, body=payload.body),
         expected_revision=payload.revision,
         actor=principal.user,
     )
-    return AssetDetailOut.detailed(asset, current=service.current_version(asset))
+    if payload.visibility is not None and asset.status == ASSET_PUBLISHED:
+        # 公开 ↔ 私有/仅站点 的切换要立刻反映到公开区。
+        # 按「已发布版本」增删链接：待发布的替换不影响线上那一版。
+        publish.sync_links(storage, asset)
+    return _detail(asset)
+
+
+# —— 发布与生命周期 ——
+
+
+@router.post("/assets/{asset_id}/publish", response_model=AssetDetailOut)
+def publish_asset(
+    asset_id: str,
+    payload: VersionActionRequest,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.publish")),
+    db: DbSession = Depends(deps.get_db),
+) -> AssetDetailOut:
+    """把当前版本发布成线上版本，并复制标题、摘要、封面与标签快照。"""
+    asset = service.get_asset(db, asset_id)
+    publish.publish(
+        db,
+        storage=_storage(request),
+        asset=asset,
+        revision=payload.revision,
+        actor=principal.user,
+    )
+    return _detail(asset)
+
+
+@router.post("/assets/{asset_id}/unpublish", response_model=AssetDetailOut)
+def unpublish_asset(
+    asset_id: str,
+    payload: VersionActionRequest,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.publish")),
+    db: DbSession = Depends(deps.get_db),
+) -> AssetDetailOut:
+    """撤回发布：公开地址立即 404，管理端仍能下载原件。"""
+    asset = service.get_asset(db, asset_id)
+    publish.unpublish(
+        db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
+    )
+    return _detail(asset)
+
+
+@router.post("/assets/{asset_id}/archive", response_model=AssetDetailOut)
+def archive_asset(
+    asset_id: str,
+    payload: VersionActionRequest,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.publish")),
+    db: DbSession = Depends(deps.get_db),
+) -> AssetDetailOut:
+    asset = service.get_asset(db, asset_id)
+    publish.archive(
+        db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
+    )
+    return _detail(asset)
+
+
+@router.post("/assets/{asset_id}/trash", response_model=AssetDetailOut)
+def trash_asset(
+    asset_id: str,
+    payload: VersionActionRequest,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.trash")),
+    db: DbSession = Depends(deps.get_db),
+) -> AssetDetailOut:
+    """放入回收站。公开链接先撤下，再改状态。"""
+    asset = service.get_asset(db, asset_id)
+    publish.trash(
+        db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
+    )
+    return _detail(asset)
+
+
+@router.post("/assets/{asset_id}/restore", response_model=AssetDetailOut)
+def restore_asset(
+    asset_id: str,
+    payload: VersionActionRequest,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.trash")),
+    db: DbSession = Depends(deps.get_db),
+) -> AssetDetailOut:
+    """从回收站恢复。不自动重新公开。"""
+    asset = service.get_asset(db, asset_id)
+    publish.restore(
+        db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
+    )
+    return _detail(asset)
+
+
+@router.delete("/assets/{asset_id}", status_code=204, response_model=None)
+def purge_asset(
+    asset_id: str,
+    request: Request,
+    principal: deps.Principal = Depends(deps.owner_writer),
+    db: DbSession = Depends(deps.get_db),
+) -> None:
+    """彻底删除（仅所有者）。必须已在回收站，且没有被别的内容当封面引用。"""
+    asset = service.get_asset(db, asset_id)
+    publish.purge(db, storage=_storage(request), asset=asset, actor=principal.user)
+
+
+# —— 文件 ——
+
+
+@router.get("/assets/{asset_id}/file")
+def download_asset(
+    asset_id: str,
+    request: Request,
+    principal: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> Response:
+    """管理下载：任意状态都能取原件，鉴权后交给 Nginx 内部跳转（支持 Range）。"""
+    asset = service.get_asset(db, asset_id)
+    version = service.current_version(asset)
+    if version is None:
+        raise ApiError.not_found("内容还没有版本")
+    return download.send_file(
+        request,
+        settings=_settings(request),
+        storage=_storage(request),
+        asset=asset,
+        version=version,
+    )
+
+
+@router.get("/assets/{asset_id}/signed-url", response_model=SignedUrlOut)
+def signed_url(
+    asset_id: str,
+    request: Request,
+    ttl: int = Query(default=signing.DEFAULT_TTL, ge=1, le=signing.MAX_TTL),
+    principal: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> SignedUrlOut:
+    """给「仅站点」内容签一个短时地址。地址绑定已发布版本，撤回后自动失效。"""
+    settings = _settings(request)
+    asset = service.get_asset(db, asset_id)
+    # 签名必须绑定线上那一版：待发布的替换不该改变已发出的地址。
+    version = publish.published_version(asset)
+    if asset.status != ASSET_PUBLISHED or version is None:
+        raise ApiError.conflict("只有已发布的内容可以签短时地址")
+    signed = signing.sign(
+        settings.pageview_hmac_secret,
+        asset_id=asset.id,
+        version_id=version.id,
+        ttl=ttl,
+    )
+    query = "&".join(f"{key}={value}" for key, value in signed.query().items())
+    return SignedUrlOut(
+        url=f"{settings.public_base_url}/api/public/v1/files/{asset.id}?{query}",
+        expires_at=signed.expires,
+    )

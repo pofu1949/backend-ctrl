@@ -1,0 +1,98 @@
+# CtrlStore 的 Nginx 示例配置。
+#
+# 放到 /etc/nginx/sites-available/ctrlstore 并软链到 sites-enabled。
+# 三件事：反代 API、只把 public/ 暴露成 /p/、为私有下载开一个只允许内部跳转的 location。
+#
+# 备案完成、证书就位后，取消最后的 TLS 段并改域名。此前 HTTP 只用于本机或局域网。
+
+upstream ctrlstore_api {
+    server 127.0.0.1:8000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    # 备案前用实际入口；域名确定后改成 server_name media.example.com;
+    server_name _;
+
+    # 请求体上限要略大于单文件上限（默认最大的是 2 GB 的视频）。
+    client_max_body_size 2100m;
+    # 分片上传时不要让代理层把整个请求体攒下来再转发。
+    proxy_request_buffering off;
+
+    # 上传内容不参与类型推断。
+    add_header X-Content-Type-Options nosniff always;
+
+    # —— API ——
+    location /api/ {
+        proxy_pass http://ctrlstore_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # API 只信任第一段，来源就是这里写进去的地址。
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    location = /healthz {
+        proxy_pass http://ctrlstore_api;
+        access_log off;
+    }
+
+    # —— 带版本号的公开地址：内容永不改变，可以长期缓存 ——
+    # 版本被替换或淘汰后源站返回 404；浏览器里已缓存的副本按 max-age 继续可用。
+    location ~ ^/p/(?<public_version>.+/v/[0-9]+/original\.[a-z0-9]+)$ {
+        alias /var/lib/ctrlstore/public/$public_version;
+        limit_except GET HEAD { deny all; }
+        sendfile on;
+        tcp_nopush on;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options nosniff always;
+        access_log off;
+    }
+
+    # —— 当前版本的公开地址：同一地址内容会随发布变化，只缓存 5 分钟 ——
+    # 只把 public/ 暴露成 /p/。originals/ 绝不写成 alias，草稿不会被翻出来。
+    location /p/ {
+        alias /var/lib/ctrlstore/public/;
+        limit_except GET HEAD { deny all; }
+        sendfile on;
+        tcp_nopush on;
+        add_header Cache-Control "public, max-age=300" always;
+        add_header X-Content-Type-Options nosniff always;
+        access_log off;
+    }
+
+    # —— 私有下载：只允许 API 用 X-Accel-Redirect 跳进来 ——
+    # www-data 对这些目录可读，但外部 URL 进不来：internal 让直接访问返回 404。
+    # 鉴权与状态判断都在 API 里，跳转只是把字节交给 Nginx（支持 Range）。
+    location /_internal/originals/ {
+        internal;
+        alias /var/lib/ctrlstore/originals/;
+        sendfile on;
+        tcp_nopush on;
+        add_header Accept-Ranges bytes always;
+        add_header Cache-Control "private, no-store" always;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
+    # 管理界面静态资源在第 10 部分再开。
+    # location /admin/ { proxy_pass http://ctrlstore_api; }
+
+    # —— 备案后启用 ——
+    # listen 443 ssl;
+    # http2 on;
+    # ssl_certificate     /etc/letsencrypt/live/media.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/media.example.com/privkey.pem;
+    # add_header Strict-Transport-Security "max-age=31536000" always;
+    # 开启 HTTPS 后，把 /etc/ctrlstore/config.toml 的 cookie_secure 改成 true。
+}
+
+# 目录权限由部署脚本设置，不写在 Nginx 配置里：
+#   /var/lib/ctrlstore               ctrlstore:ctrlstore  0750
+#   /var/lib/ctrlstore/public        ctrlstore:www-data   0750   外部可读（经 /p/）
+#   /var/lib/ctrlstore/originals     ctrlstore:www-data   0750   只给 internal location
+#   /var/lib/ctrlstore/derivatives   ctrlstore:www-data   0750   同上
+#   /var/lib/ctrlstore/tmp           ctrlstore:ctrlstore  0750   Nginx 不读

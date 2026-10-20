@@ -51,6 +51,12 @@ ASSET_CREATED = "asset_created"
 ASSET_UPDATED = "asset_updated"
 ASSET_VERSION_ADDED = "asset_version_added"
 ASSET_VERSION_PRUNED = "asset_version_pruned"
+ASSET_PUBLISHED = "asset_published"
+ASSET_UNPUBLISHED = "asset_unpublished"
+ASSET_ARCHIVED = "asset_archived"
+ASSET_TRASHED = "asset_trashed"
+ASSET_RESTORED = "asset_restored"
+ASSET_PURGED = "asset_purged"
 
 
 def record(

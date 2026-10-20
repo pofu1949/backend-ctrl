@@ -73,17 +73,37 @@ class LocalStorage:
 
     originals_dir: Path
     tmp_dir: Path
+    public_dir: Path
 
     @classmethod
     def from_settings(cls, settings: Settings) -> LocalStorage:
-        assert settings.originals_dir is not None and settings.tmp_dir is not None
-        return cls(originals_dir=settings.originals_dir, tmp_dir=settings.tmp_dir)
+        assert (
+            settings.originals_dir is not None
+            and settings.tmp_dir is not None
+            and settings.public_dir is not None
+        )
+        return cls(
+            originals_dir=settings.originals_dir,
+            tmp_dir=settings.tmp_dir,
+            public_dir=settings.public_dir,
+        )
 
     # —— 路径推导 ——
 
     def original_path(self, key: str) -> Path:
         """键到原件路径。先校验键，再拼目录，避免出现越界写入。"""
         return self.originals_dir / keys.validate(key)
+
+    def public_dir_for(self, asset_id: str) -> Path:
+        return self.public_dir / _safe_segment(asset_id)
+
+    def public_current_path(self, asset_id: str, extension: str) -> Path:
+        """当前发布版的公开地址对应文件：``public/<id>/original.jpg``。"""
+        return self.public_dir_for(asset_id) / f"original.{extension}"
+
+    def public_version_path(self, asset_id: str, version_no: int, extension: str) -> Path:
+        """带版本号的公开地址：``public/<id>/v/<n>/original.jpg``。"""
+        return self.public_dir_for(asset_id) / "v" / str(version_no) / f"original.{extension}"
 
     def session_dir(self, session_id: str) -> Path:
         return self.tmp_dir / "uploads" / _safe_segment(session_id)
@@ -178,6 +198,71 @@ class LocalStorage:
                 size += len(chunk)
         return digest.hexdigest(), size
 
+    # —— 公开区 ——
+
+    def link_public(self, source: Path, *, asset_id: str, targets: Iterable[Path]) -> list[Path]:
+        """把原件挂进公开区。同盘用硬链接，跨盘退化为复制。
+
+        先写 ``<名字>.tmp`` 再 ``os.replace`` 成正式名：Nginx 只会看到完整的文件，
+        中途失败留下的是 ``.tmp``（fsck 会报出来），不是半个可访问的文件。
+        失败时清掉该内容刚建的部分，避免出现"只公开了一半"。
+        """
+        linked: list[Path] = []
+        copied = not self.same_filesystem()
+        try:
+            for target in targets:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                staging = target.with_name(f"{target.name}.tmp")
+                staging.unlink(missing_ok=True)
+                if copied:
+                    shutil.copy2(source, staging)
+                else:
+                    os.link(source, staging)
+                os.replace(staging, target)
+                linked.append(target)
+        except OSError:
+            self.clear_public(asset_id)
+            raise
+        return linked
+
+    def clear_public(self, asset_id: str) -> None:
+        """删掉一个内容在公开区的全部链接（含版本目录与残留 .tmp）。"""
+        shutil.rmtree(self.public_dir_for(asset_id), ignore_errors=True)
+
+    def same_filesystem(self) -> bool:
+        """原件区与公开区是否同一块盘。跨盘时只能复制，空间会翻倍。"""
+        originals = _existing(self.originals_dir)
+        public = _existing(self.public_dir)
+        if originals is None or public is None:
+            return True
+        try:
+            return os.stat(originals).st_dev == os.stat(public).st_dev
+        except OSError:
+            return True
+
+    def public_asset_ids(self) -> list[str]:
+        """公开区里出现过的内容 ID。目录名不是 UUID 的一律忽略。"""
+        if not self.public_dir.is_dir():
+            return []
+        return sorted(
+            child.name
+            for child in self.public_dir.iterdir()
+            if child.is_dir() and len(child.name) == 36
+        )
+
+    def public_files(self, asset_id: str) -> list[Path]:
+        """一个内容在公开区的全部文件（含 .tmp 残留）。"""
+        directory = self.public_dir_for(asset_id)
+        if not directory.is_dir():
+            return []
+        return sorted(path for path in directory.rglob("*") if path.is_file())
+
+    def stored_files(self) -> list[Path]:
+        """原件区里的全部文件，供 fsck 找「有文件没记录」。"""
+        if not self.originals_dir.is_dir():
+            return []
+        return sorted(path for path in self.originals_dir.rglob("*") if path.is_file())
+
     # —— 清理 ——
 
     def discard_session(self, session_id: str) -> None:
@@ -205,3 +290,11 @@ def _safe_segment(value: str) -> str:
     if not value or not all(char.isalnum() or char == "-" for char in value):
         raise ValueError("非法的会话标识")
     return value
+
+
+def _existing(path: Path) -> Path | None:
+    """最近的已存在目录。目录还没建时用它量文件系统。"""
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return None

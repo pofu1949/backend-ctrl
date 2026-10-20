@@ -19,6 +19,10 @@ data_dir = "/var/lib/ctrlstore"
 # 备案前用实际入口，例如局域网地址；备案后只改这一项，内容 ID 不变。
 public_base_url = "http://127.0.0.1:8000"
 
+# 私有下载是否交给 Nginx 发送（X-Accel-Redirect）。
+# 生产必须为 true；本地直接跑 API、没有 Nginx 时设成 false，由进程发送文件。
+x_accel_redirect = true
+
 # —— 健康阈值 ——
 # 剩余空间低于 10 GB 或低于总容量 5% 即视为 degraded，并拒绝新的上传。
 min_free_bytes = 10737418240

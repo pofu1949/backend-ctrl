@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 4 部分（目录、内容与版本）已完成**。发布、公开读取、页面尚未实现。
+当前进度：**第 5 部分（发布与公开文件）已完成**。公开读取 API（集合、文章）、缩略图、管理页面尚未实现。
 
 ## 目录
 
@@ -46,11 +46,18 @@ backend_ctrl/
     assets/                 内容与版本
       markdown.py           front matter 与正文引用
       service.py            登记、元数据、版本替换与保留、引用维护
+      publish.py            发布/撤回/归档/回收站/恢复 + 公开链接
+      signing.py            短时签名地址
+      download.py           私有下载（X-Forwarded 或直接发送）
       router.py schemas.py  管理接口 /assets
-    content/ imaging/ public_api/
-                            后续部分按此分层填充
-  alembic/                  迁移脚本（0001 基线、0002 身份、0003 上传、0004 内容）
-  deploy/                   Nginx、systemd、示例配置
+    public_api/             公开接口 /api/public
+      files.py              签名下载
+    fsck.py                 一致性检查
+    content/ imaging/       后续部分按此分层填充
+  alembic/                  迁移脚本（0001 基线 … 0004 内容）
+  deploy/
+    nginx/ctrlstore.conf.example
+    systemd/                第 9 部分
   scripts/                  备份与恢复
   tests/                    pytest
 ```
@@ -115,7 +122,8 @@ ctrlstore token create (--site 标识 | --user 用户名) [--name 备注] [--exp
 ctrlstore token list
 ctrlstore token revoke <令牌 ID>
 
-ctrlstore import <本地路径>                  # 从服务器路径导入，免去先下载再上传
+ctrlstore import <本地路径> [--asset-id <ID>]   # 从服务器路径导入；带 ID 则作为新版本
+ctrlstore fsck [--fix-public-links] [--skip-hashes]   # 一致性检查
 ```
 
 `init` 会提示输入两次密码；非交互环境加 `--password-stdin` 从标准输入读一行。
@@ -163,6 +171,15 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | POST | `/api/admin/v1/assets` | `asset.upload`；直接创建 Markdown / 纯文本 |
 | GET | `/api/admin/v1/assets/{id}` | `asset.read`；含全部保留版本 |
 | PATCH | `/api/admin/v1/assets/{id}` | `asset.update`；改元数据、标签或正文，必须带 `revision` |
+| POST | `/api/admin/v1/assets/{id}/publish` | `asset.publish`；发布当前版本 |
+| POST | `/api/admin/v1/assets/{id}/unpublish` | `asset.publish`；撤回，公开地址立即 404 |
+| POST | `/api/admin/v1/assets/{id}/archive` | `asset.publish`；归档 |
+| POST | `/api/admin/v1/assets/{id}/trash` | `asset.trash`；进回收站 |
+| POST | `/api/admin/v1/assets/{id}/restore` | `asset.trash`；恢复，不自动公开 |
+| DELETE | `/api/admin/v1/assets/{id}` | 所有者；彻底删除（须已在回收站） |
+| GET | `/api/admin/v1/assets/{id}/file` | `asset.read`；任意状态下载原件（支持 Range） |
+| GET | `/api/admin/v1/assets/{id}/signed-url` | `asset.read`；给已发布内容签短时地址 |
+| GET | `/api/public/v1/files/{id}` | 匿名；凭签名读取，撤回后 404 |
 
 替换文件没有单独接口：`POST /uploads` 或 `/uploads/direct` 带 `asset_id`，完成后追加为新版本。
 新建与替换共用一条上传路径，避免两套登记规则。
@@ -305,6 +322,95 @@ Markdown 与纯文本可以不经上传直接创建，也可以直接改正文�
 
 `revision` 是乐观锁：修改元数据必须带 `revision`，不一致返回 409。一次请求（无论改几个字段、
 是否同时改标签）只加 1；替换版本也加 1。
+
+## 发布与公开区
+
+### 可见性矩阵
+
+发布不等于公开：内容默认 `private`。只有「已发布 + `public` 或 `unlisted`」才会在
+`public/` 下出现文件（企划第 12.7 节）。
+
+| 状态 + 可见性 | `/p/` 当前版 | 管理下载 |
+| --- | --- | --- |
+| 草稿 / 任意 | 无 | 有 |
+| 已发布 + private | 无 | 有 |
+| 已发布 + site | 无（只能签名地址） | 有 |
+| 已发布 + unlisted | 有 | 有 |
+| 已发布 + public | 有 | 有 |
+| 回收站 | 无 | 有 |
+
+### 公开区布局
+
+```text
+public/<asset_id>/original.png          当前发布版（硬链接，地址 /p/<id>/original.png）
+public/<asset_id>/v/<n>/original.png    同一版本（地址 /p/<id>/v/<n>/original.png，可长期缓存）
+```
+
+扩展名随该版本的**真实类型**变化：换过文件类型之后，旧扩展名的地址必须消失，
+所以每次发布都会先清空该内容在 `public/` 下的目录，再重建两个链接。
+同盘用硬链接；原件区与公开区不在同一块盘时退化为复制，健康检查会标 `degraded`
+（`public_not_same_filesystem`）。
+
+**公开区永远指向「已发布版本」，不是「当前版本」。** 发布之后又替换了文件时，两条指针
+指向不同的行：线上仍是旧版，公开区、签名地址、`fsck`、改可见性都必须按 `published_version_id`
+判断。这个选择集中在 [`publish.desired_links`](src/ctrlstore/assets/publish.py) 与
+`publish.published_version`，调用方不传版本号——传错一次就会把仍在线上的一版判成"该删"。
+
+### 状态变化与失败落点
+
+| 动作 | 权限 | 做的事 |
+| --- | --- | --- |
+| 发布 | `asset.publish` | 校验版本与引用 → 提交快照与状态 → 建链接 |
+| 撤回 / 归档 | `asset.publish` | 删链接 → 状态回 `draft` / `archived`，清空快照 |
+| 转私有 / 转公开 | `asset.publish`（已发布内容改可见性） | 按新可见性增删链接 |
+| 进回收站 | `asset.trash` | 删链接 → 标 `trashed` |
+| 恢复 | `asset.trash` | 只改状态，**不自动重新公开** |
+| 彻底删除 | 仅所有者 | 须已在回收站；有内容把它当封面时拒绝并列出引用 |
+
+失败一律落在「更不可访问」这一侧：发布时先提交状态再建链接（链接失败 = 公开地址 404，
+不会泄露未发布内容）；撤回时先删链接再提交状态（提交失败也只是 404）。残留的链接由
+`fsck` 收掉。
+
+`published_version_id` 非空当且仅当当前处于已发布状态：撤回、归档、进回收站都会清空
+发布快照，公开查询因此只需要判断一个条件。
+
+### 引用检查
+
+发布文章时，正文引用的图片必须**已发布**，否则 409 并列出缺失的内容 ID。
+图片之后被撤回时，文章仍保持发布——第 6 部分渲染时会去掉那张图。
+
+### 私有下载与短时签名
+
+`GET /assets/{id}/file` 鉴权后由 Nginx 用 `X-Accel-Redirect` 发送（支持 Range）；
+`originals/` 在 Nginx 里只配 `internal` location，外部 URL 进不去。
+开发环境没有 Nginx 时把 `x_accel_redirect` 设为 `false`，由进程直接发送。
+
+「仅站点」内容不进入 `/p/`，网站后端用签名地址取字节：
+
+```bash
+# 站点后端（或所有者）先换一个短时地址
+GET /api/admin/v1/assets/{id}/signed-url?ttl=300
+# => {"url": "http://…/api/public/v1/files/<id>?version=<vid>&expires=<ts>&sig=<hmac>", ...}
+
+# 再按这个地址取字节；签名过期、内容撤回或版本被替换之后一律 404
+curl -o poster.jpg "http://…/api/public/v1/files/<id>?version=…&expires=…&sig=…"
+```
+
+签名绑定「内容 ID + 已发布版本 ID + 过期时间」，默认 300 秒、最长 1 小时。
+撤回或替换之后旧签名自然失效，不需要吊销表。签名密钥由 `pageview_hmac_secret`
+派生（`hmac(secret, "ctrlstore/file-signing/v1")`），不额外增加配置项。
+
+### fsck
+
+```bash
+ctrlstore fsck                      # 只报告
+ctrlstore fsck --fix-public-links   # 按已提交状态增删公开链接
+ctrlstore fsck --skip-hashes        # 文件多时跳过哈希比对
+```
+
+检查六项：记录有而文件缺失、文件有而记录缺失、应公开却缺链接、公开区多余链接、
+哈希或大小不一致、残留的 `.tmp` 链接。`--fix-public-links` **只**动公开区，
+不删任何原件，也不会把已撤回或回收站里的内容重新公开。发现问题时退出码为 1。
 
 ## 数据库
 

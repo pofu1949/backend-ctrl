@@ -111,6 +111,19 @@ class AssetListOut(BaseModel):
     next_cursor: str | None = None
 
 
+class VersionActionRequest(BaseModel):
+    """发布、撤回、归档、回收站、恢复都按 ``revision`` 串行（企划第 8.6 节）。"""
+
+    revision: int = Field(ge=1)
+
+
+class SignedUrlOut(BaseModel):
+    """短时签名地址。绑定已发布版本，撤回后自动失效。"""
+
+    url: str
+    expires_at: int
+
+
 class CreateTextAssetRequest(BaseModel):
     """直接创建 Markdown 或纯文本（企划第 8.4 节 T1）。
 

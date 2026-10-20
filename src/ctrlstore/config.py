@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     # —— 对外地址 ——
     public_base_url: str = "http://127.0.0.1:8000"
 
+    #: 私有下载是否交给 Nginx 发送（``X-Accel-Redirect``）。
+    #: 生产必须为 true；开发环境没有 Nginx 时关掉，由进程直接发送文件。
+    x_accel_redirect: bool = True
+
     # —— 健康阈值 ——
     min_free_bytes: int = 10 * GiB
     min_free_ratio: float = 0.05

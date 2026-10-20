@@ -23,11 +23,15 @@ from .db import create_engine, run_migrations
 from .errors import register_error_handlers
 from .health import check_health
 from .log import configure_logging
+from .public_api.files import router as public_router
 
 logger = logging.getLogger(__name__)
 
 #: 管理接口前缀（企划第 13 章）。
 ADMIN_PREFIX = "/api/admin/v1"
+
+#: 公开接口前缀。
+PUBLIC_PREFIX = "/api/public/v1"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -70,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_error_handlers(app)
     app.include_router(admin_router, prefix=ADMIN_PREFIX)
+    app.include_router(public_router, prefix=PUBLIC_PREFIX)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

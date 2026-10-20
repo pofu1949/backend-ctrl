@@ -1,6 +1,6 @@
 """健康检查。
 
-两项判据（企划第 17.2 节）：可用内存和数据库所在数据盘的空间。
+三项判据：可用内存、数据盘空间、公开区与原件区是否同一文件系统。
 
 检查只读操作系统信息，不查询业务表：数据库还没迁移时也能回答进程是否活着；
 迁移失败会以启动失败表现出来，而不是在这里假装 ``ok``。
@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ REASON_DISK_FREE_BYTES = "disk_free_bytes"
 REASON_DISK_FREE_RATIO = "disk_free_ratio"
 REASON_AVAILABLE_MEMORY = "available_memory"
 REASON_DISK_UNAVAILABLE = "disk_unavailable"
+#: 公开区与原件区不在同一块盘：硬链接退化为复制，同样的字节要占两份空间。
+REASON_PUBLIC_NOT_SAME_FS = "public_not_same_filesystem"
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,30 @@ def check_health(settings: Settings) -> HealthReport:
     if psutil.virtual_memory().available < settings.min_available_memory_bytes:
         reasons.append(REASON_AVAILABLE_MEMORY)
 
+    if not _public_on_same_filesystem(settings):
+        reasons.append(REASON_PUBLIC_NOT_SAME_FS)
+
     return HealthReport(status="degraded" if reasons else "ok", reasons=tuple(reasons))
+
+
+def _public_on_same_filesystem(settings: Settings) -> bool:
+    """公开区与原件区必须在同一块盘，否则发布只能复制，空间翻倍。"""
+    assert settings.originals_dir is not None and settings.public_dir is not None
+    originals = _existing(settings.originals_dir)
+    public = _existing(settings.public_dir)
+    if originals is None or public is None:
+        return True
+    try:
+        return os.stat(originals).st_dev == os.stat(public).st_dev
+    except OSError:
+        return True
+
+
+def _existing(path: Path) -> Path | None:
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def disk_usage(path: Path) -> tuple[int, int] | None:

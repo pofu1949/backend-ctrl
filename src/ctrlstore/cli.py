@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.orm import sessionmaker
 
-from . import __version__
+from . import __version__, fsck
 from .assets import service as asset_service
 from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
@@ -34,6 +34,16 @@ from .uploads import service as upload_service
 
 #: 目录权限：属主与同组可进入，其他用户无权限（企划第 11.1 节）。
 DIRECTORY_MODE = 0o750
+
+#: fsck 问题代号的中文说明。
+_ISSUE_LABELS = {
+    "missing_file": "数据库有记录但文件不存在",
+    "orphan_file": "文件存在但没有记录",
+    "missing_link": "应公开但缺少链接",
+    "stale_link": "公开区存在多余链接",
+    "hash_mismatch": "哈希或大小不一致",
+    "temp_link": "残留的 .tmp 链接",
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -75,6 +85,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--asset-id", default=None, help="要替换的内容 ID；给了就作为该内容的新版本"
     )
     upload.set_defaults(handler=_cmd_import)
+
+    fsck = subcommands.add_parser("fsck", help="检查库记录与磁盘是否一致")
+    fsck.add_argument(
+        "--fix-public-links",
+        action="store_true",
+        help="按已提交的发布状态增删公开链接；不删原件，也不重新公开已撤回内容",
+    )
+    fsck.add_argument("--skip-hashes", action="store_true", help="跳过哈希比对（文件多时更快）")
+    fsck.set_defaults(handler=_cmd_fsck)
 
     _build_user_commands(subcommands)
     _build_site_commands(subcommands)
@@ -435,6 +454,39 @@ def _cmd_import(args: argparse.Namespace) -> int:
         if duplicate:
             print(f"提示：库中已有相同字节的上传（{duplicate}）")
     return 0
+
+
+def _cmd_fsck(args: argparse.Namespace) -> int:
+    """检查库记录与磁盘是否一致。默认只报告，``--fix-public-links`` 才动公开区。"""
+    settings = _load(args)
+    storage = LocalStorage.from_settings(settings)
+    with _session(settings) as db:
+        report = fsck.run(
+            db,
+            storage=storage,
+            fix_public_links=args.fix_public_links,
+            check_hashes=not args.skip_hashes,
+        )
+
+    print(f"检查了 {report.checked_files} 个版本文件")
+    if report.ok:
+        print("没有发现问题")
+        return 0
+
+    grouped: dict[str, list[str]] = {}
+    for issue in report.issues:
+        grouped.setdefault(issue.code, []).append(issue.detail)
+    for code, details in sorted(grouped.items()):
+        print(f"{_ISSUE_LABELS.get(code, code)}（{len(details)}）：")
+        for detail in details:
+            print(f"  - {detail}")
+
+    if report.fixed:
+        print(f"已修复 {report.fixed} 处公开链接")
+    remaining = [issue for issue in report.issues if not (args.fix_public_links and issue.fixable)]
+    if remaining:
+        print(f"仍有 {len(remaining)} 处需要人工处理（fsck 不删原件）")
+    return 0 if not remaining else 1
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
