@@ -13,18 +13,25 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy.orm import sessionmaker
 
 from . import __version__
+from .admin_api import router as admin_router
+from .auth.throttle import LoginThrottle
 from .config import Settings, load_settings
 from .db import create_engine, run_migrations
+from .errors import register_error_handlers
 from .health import check_health
 from .log import configure_logging
 
 logger = logging.getLogger(__name__)
 
+#: 管理接口前缀（企划第 13 章）。
+ADMIN_PREFIX = "/api/admin/v1"
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """构造应用。测试可注入配置，生产由 Uvicorn 以 factory 方式调用。"""
+    """构造应用。测试可注入配置，生产由 ``ctrlstore serve`` 调用。"""
     settings = settings or load_settings()
 
     @asynccontextmanager
@@ -57,6 +64,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.engine = create_engine(settings)
+    # 每个请求一个 Session；连接仍只有一条，由引擎的 pool_size=1 保证。
+    app.state.session_factory = sessionmaker(bind=app.state.engine, expire_on_commit=False)
+    app.state.login_throttle = LoginThrottle()
+
+    register_error_handlers(app)
+    app.include_router(admin_router, prefix=ADMIN_PREFIX)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

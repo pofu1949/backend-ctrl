@@ -14,13 +14,14 @@ from sqlalchemy import Connection
 
 from ctrlstore.config import load_settings
 from ctrlstore.db import create_engine
+from ctrlstore.models import Base
 
 config = context.config
 
 
 def _target_metadata():
-    """迁移需要模型的元数据。第一部分还没有业务表，返回空元数据。"""
-    return None
+    """模型元数据。``alembic revision --autogenerate`` 需要它，手工迁移也保持同步。"""
+    return Base.metadata
 
 
 def _connection() -> Connection:

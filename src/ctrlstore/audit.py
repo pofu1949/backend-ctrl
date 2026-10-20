@@ -1,0 +1,82 @@
+"""审计记录。
+
+只追加。每条记录都属于「谁、做了什么、对谁、什么时候」。
+登录失败没有合法主体，用 ``actor_type="anonymous"`` 表示。
+
+调用方负责提交事务：审计与应用状态在同一事务里，避免出现「改了数据但没留痕」。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from sqlalchemy.orm import Session as DbSession
+
+from .models import AuditLog, User, utcnow
+
+ACTOR_ANONYMOUS = "anonymous"
+ACTOR_USER = "user"
+ACTOR_SITE = "site"
+ACTOR_SYSTEM = "system"
+
+TARGET_USER = "user"
+TARGET_SITE = "site"
+TARGET_TOKEN = "token"
+
+#: 已知动作。集中列出，避免日志和界面里出现拼错的动作名。
+LOGIN = "login"
+LOGIN_FAILED = "login_failed"
+LOGOUT = "logout"
+USER_CREATED = "user_created"
+USER_DISABLED = "user_disabled"
+PASSWORD_RESET = "password_reset"
+PERMISSIONS_CHANGED = "permissions_changed"
+SITE_CREATED = "site_created"
+TOKEN_CREATED = "token_created"
+TOKEN_REVOKED = "token_revoked"
+
+
+def record(
+    db: DbSession,
+    *,
+    action: str,
+    actor_type: str = ACTOR_SYSTEM,
+    actor_id: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> AuditLog:
+    """写入一条审计记录（调用方提交）。"""
+    entry = AuditLog(
+        actor_type=actor_type,
+        actor_id=actor_id or "",
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail=json.dumps(detail, ensure_ascii=False, default=str) if detail else None,
+        created_at=utcnow(),
+    )
+    db.add(entry)
+    return entry
+
+
+def record_for_user(
+    db: DbSession,
+    actor: User,
+    *,
+    action: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> AuditLog:
+    """以某个用户的身份记一条。"""
+    return record(
+        db,
+        action=action,
+        actor_type=ACTOR_USER,
+        actor_id=actor.id,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+    )

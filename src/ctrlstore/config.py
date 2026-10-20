@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     min_free_ratio: float = 0.05
     min_available_memory_bytes: int = 1 * GiB
 
+    # —— 会话与 Cookie ——
+    #: 绝对有效期（小时），从登录算起。
+    session_absolute_hours: int = 12
+    #: 空闲有效期（小时），每次访问刷新。
+    session_idle_hours: int = 2
+    #: 是否给会话 Cookie 加 Secure。启用 HTTPS 后必须打开。
+    cookie_secure: bool = False
+
     # —— 进程 ——
     log_level: str = "INFO"
     api_host: str = "127.0.0.1"
@@ -135,6 +143,15 @@ class Settings(BaseSettings):
         if len(value) < MIN_SECRET_LENGTH:
             raise ValueError(f"至少 {MIN_SECRET_LENGTH} 个字符")
         return value
+
+    @model_validator(mode="after")
+    def _session_window_sane(self) -> Settings:
+        """空闲窗口必须短于绝对窗口，否则“绝对过期”形同虚设。"""
+        if self.session_absolute_hours <= 0 or self.session_idle_hours <= 0:
+            raise ValueError("会话时长必须为正数")
+        if self.session_idle_hours > self.session_absolute_hours:
+            raise ValueError("空闲有效期不能长于绝对有效期")
+        return self
 
     @model_validator(mode="after")
     def _fill_directories(self) -> Settings:

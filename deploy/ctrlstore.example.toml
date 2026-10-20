@@ -25,6 +25,13 @@ min_free_bytes = 10737418240
 min_free_ratio = 0.05
 min_available_memory_bytes = 1073741824
 
+# —— 会话与 Cookie ——
+# 绝对有效期 12 小时，空闲 2 小时；空闲不能长于绝对。
+session_absolute_hours = 12
+session_idle_hours = 2
+# 启用 HTTPS 之后必须改为 true，否则会话 Cookie 可能随明文请求被带走。
+cookie_secure = false
+
 # —— 进程 ——
 log_level = "INFO"
 api_host = "127.0.0.1"

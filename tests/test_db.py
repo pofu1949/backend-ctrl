@@ -10,6 +10,18 @@ from ctrlstore.config import Settings
 from ctrlstore.db import PRAGMAS, create_engine, migration_script_location, run_migrations
 
 
+def _head_revision() -> str:
+    """迁移链的最新版本。硬编码版本号会让每加一份迁移都要改测试。"""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option("script_location", str(migration_script_location()))
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert head is not None
+    return head
+
+
 def _pragma(engine, name: str):
     with engine.connect() as connection:
         return connection.exec_driver_sql(f"PRAGMA {name}").scalar()
@@ -31,7 +43,7 @@ def test_migration_upgrades_empty_database(settings: Settings) -> None:
     finally:
         engine.dispose()
 
-    assert revision == "0001"
+    assert revision == _head_revision()
     assert settings.db_path.is_file()
 
 
@@ -45,7 +57,7 @@ def test_migration_is_idempotent(settings: Settings) -> None:
     finally:
         engine.dispose()
 
-    assert rows == [("0001",)]
+    assert rows == [(_head_revision(),)]
 
 
 def test_pragmas_are_applied(settings: Settings) -> None:
