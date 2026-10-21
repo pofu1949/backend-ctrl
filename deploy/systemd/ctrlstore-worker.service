@@ -1,0 +1,34 @@
+# CtrlStore 后台 worker。同时只做一件事：缩略图、抽取、视频封面、定时发布、清理。
+# 与 API 分进程，长任务不会挡住登录与发布。
+#
+# 安装：
+#   install -m 0644 ctrlstore-worker.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now ctrlstore-worker
+[Unit]
+Description=CtrlStore worker
+After=network.target
+
+[Service]
+Type=simple
+User=ctrlstore
+Group=ctrlstore
+WorkingDirectory=/var/lib/ctrlstore
+EnvironmentFile=-/etc/ctrlstore/secrets.env
+ExecStart=/opt/ctrlstore/.venv/bin/ctrlstore worker
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+# 解码大图、读大表时的峰值由这里封顶；超限由 systemd 停掉再拉起（企划第 17.2 节）。
+MemoryMax=768M
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# 备份脚本停写时也需要 worker 可写数据目录；备份目录只读不写。
+ReadWritePaths=/var/lib/ctrlstore
+
+[Install]
+WantedBy=multi-user.target

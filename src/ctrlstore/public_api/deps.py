@@ -97,6 +97,17 @@ def collection_readable(db: DbSession, collection: Collection, *, site: Site | N
     return collections.can_read_collection(db, collection, site=site)
 
 
+def searchable(db: DbSession, asset: Asset, *, site: Site | None) -> bool:
+    """站点搜索能不能列出这条。
+
+    「未列出」内容知道地址可以读，但不该被搜索发现——发现型接口按目录型处理。
+    其余沿用 :func:`can_read_asset`：公开可读，仅站点必须出现在已授权集合里。
+    """
+    if site is None or not can_read_asset(db, asset, site=site):
+        return False
+    return asset.visibility != VISIBILITY_UNLISTED
+
+
 def _in_granted_collection(db: DbSession, asset: Asset, site: Site) -> bool:
     """「仅站点」内容必须出现在该站点已授权的集合里。"""
     slugs = db.scalars(

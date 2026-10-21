@@ -1,7 +1,8 @@
 """健康检查。
 
-三项判据：可用内存、数据盘空间、公开区与原件区是否同一文件系统。
+匿名接口只回答进程状态；所有者接口另给磁盘、队列、迁移版本与上次成功备份。
 
+匿名状态只看三件事：可用内存、数据盘空间、公开区与原件区是否同一文件系统。
 检查只读操作系统信息，不查询业务表：数据库还没迁移时也能回答进程是否活着；
 迁移失败会以启动失败表现出来，而不是在这里假装 ``ok``。
 """
@@ -15,8 +16,13 @@ from pathlib import Path
 from typing import Literal
 
 import psutil
+from sqlalchemy import text
+from sqlalchemy.orm import Session as DbSession
 
+from . import __version__
+from .backup import latest_complete
 from .config import Settings
+from .jobs import service as jobs
 
 HealthStatus = Literal["ok", "degraded"]
 
@@ -98,3 +104,26 @@ def disk_usage(path: Path) -> tuple[int, int] | None:
                 return None
             return usage.free, usage.total
     return None
+
+
+def admin_report(db: DbSession, settings: Settings) -> dict:
+    """所有者健康接口（企划第 9 部分）。
+
+    匿名接口仍然只有 ``status``；磁盘细节、队列、上次备份与版本只出现在这里。
+    """
+    report = check_health(settings)
+    usage = disk_usage(settings.data_dir)
+    schema_version = db.scalar(text("SELECT version_num FROM alembic_version"))
+    return {
+        "status": report.status,
+        "reasons": list(report.reasons),
+        "app_version": __version__,
+        "schema_version": schema_version,
+        "disk": {
+            "data_dir": str(settings.data_dir),
+            "free_bytes": usage[0] if usage else None,
+            "total_bytes": usage[1] if usage else None,
+        },
+        "jobs": jobs.counts(db),
+        "last_backup": latest_complete(settings.backup_dir),
+    }

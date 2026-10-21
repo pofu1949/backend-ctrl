@@ -4,26 +4,36 @@
 这样做的好处是：发布、缩略图、清理各自都已经是完整业务动作，重试一次不会
 读到半截状态；失败时也只写 ``jobs.last_error``，不改动已经提交的业务结果。
 
-本部分只有四类任务：
+本部分有六类任务：
 
 | 类型 | 做什么 |
 | --- | --- |
 | ``image.thumb`` | 生成 480 像素 WebP 缩略图，就绪后按发布状态补进公开区 |
 | ``image.display`` | 1600 像素展示图，代码同上一行，默认不入队（企划第 8.5 节 D2） |
+| ``content.extract`` | 文档/文本抽取、xlsx 预览、PDF 首页图 |
+| ``video.inspect`` | ffprobe 判断能否播放，ffmpeg 截封面 |
 | ``publish.due`` | 把到点的定时发布送出去 |
-| ``maintenance.cleanup`` | 过期上传、回收站到期清理、旧任务记录 |
+| ``maintenance.cleanup`` | 过期上传、回收站到期、访问明细、旧任务记录 |
+
+抽取与探测定性失败（损坏、超限、加密）只记录状态并结束任务，不重试：
+重试解决不了这些问题，还会堵住后面的任务。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
-from ..assets import publish
+from ..assets import derivatives, publish
 from ..config import Settings
+from ..content import extract as content_extract
+from ..content import pdf_text, video
+from ..content.limits import ExtractionFailed, ExtractionSkipped
 from ..errors import ApiError
 from ..imaging import render_webp
 from ..models import (
@@ -31,15 +41,23 @@ from ..models import (
     DERIVATIVE_FAILED,
     DERIVATIVE_PENDING,
     DERIVATIVE_READY,
+    EXTRACT_FAILED,
+    EXTRACT_READY,
+    EXTRACT_SKIPPED,
     PURPOSE_DISPLAY,
+    PURPOSE_POSTER,
+    PURPOSE_TABLE_PREVIEW,
     PURPOSE_THUMB,
     Asset,
+    AssetVersion,
     Derivative,
     utcnow,
 )
+from ..search import service as search
 from ..stats import pageviews
 from ..storage import LocalStorage
 from ..uploads import service as uploads
+from ..uploads.inspection import KIND_PDF
 from . import service as jobs
 
 logger = logging.getLogger(__name__)
@@ -77,19 +95,213 @@ def _image_derivative(*, settings: Settings, storage: LocalStorage, db: DbSessio
         raise JobError("原件不存在，无法生成派生文件")
 
     _mark(db, derivative, DERIVATIVE_PENDING)
+    target = storage.derivative_path(derivative.storage_key)
     try:
         render_webp(
             source,
-            storage.derivative_path(derivative.storage_key),
+            target,
             max_side=_max_side(settings, derivative.purpose),
         )
     except Exception as exc:  # 解码失败、内存不足、磁盘错误都在这里
         _mark(db, derivative, DERIVATIVE_FAILED)
         raise JobError(f"{derivative.purpose} 生成失败：{exc}") from exc
 
+    derivative.byte_size = target.stat().st_size
     _mark(db, derivative, DERIVATIVE_READY)
     # 只有「现在就应该在公开区」的那一版才补链接；失败留给 fsck，不影响图片可用。
     publish.link_derivative(db=db, storage=storage, derivative=derivative)
+
+
+# —— 文本抽取、表格预览与 PDF 首页图 ——
+
+
+def _content_extract(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
+    """抽取一个版本的文本；xlsx 另存预览 JSON，PDF 另存首页图。"""
+    version = _version(db, payload)
+    if version is None:
+        return
+    asset = db.get(Asset, version.asset_id)
+    if asset is None or asset.status == ASSET_TRASHED:
+        return
+    source = storage.original_path(version.storage_key)
+    if not source.is_file():
+        raise JobError("原件不存在，无法抽取文本")
+
+    result = None
+    try:
+        result = content_extract.run(source, kind=asset.kind)
+    except ExtractionSkipped as exc:
+        _mark_extract(db, asset=asset, version=version, status=EXTRACT_SKIPPED, reason=str(exc))
+    except ExtractionFailed as exc:
+        _mark_extract(db, asset=asset, version=version, status=EXTRACT_FAILED, reason=str(exc))
+
+    if result is not None:
+        version.text_extract = result.text
+        version.text_truncated = result.truncated
+        if result.page_count is not None:
+            version.page_count = result.page_count
+        version.extract_status = EXTRACT_READY if result.text else EXTRACT_SKIPPED
+        if result.table is not None:
+            _store_preview(db, storage=storage, asset=asset, version=version, table=result.table)
+        db.commit()
+        search.refresh(db, asset)
+        db.commit()
+
+    # 文本抽取失败不妨碍给 PDF 做首页图：扫描版 PDF 正是没有文本的那一类。
+    if asset.kind == KIND_PDF:
+        _store_poster(
+            db,
+            storage=storage,
+            asset=asset,
+            version=version,
+            renderer=pdf_text.render_first_page,
+        )
+
+
+def _mark_extract(
+    db: DbSession,
+    *,
+    asset: Asset,
+    version: AssetVersion,
+    status: str,
+    reason: str,
+) -> None:
+    """记下跳过或失败。保留原件，供管理端显示抽取状态。"""
+    version.text_extract = None
+    version.text_truncated = False
+    version.extract_status = status
+    db.commit()
+    search.refresh(db, asset)
+    db.commit()
+    logger.info(
+        "文本抽取未完成",
+        extra={"version_id": version.id, "kind": asset.kind, "status": status, "reason": reason},
+    )
+
+
+def _store_preview(
+    db: DbSession,
+    *,
+    storage: LocalStorage,
+    asset: Asset,
+    version: AssetVersion,
+    table: dict,
+) -> None:
+    """把 xlsx 预览写成派生 JSON。预览不是公开文件，只在表格接口里读。"""
+    data = json.dumps(table, ensure_ascii=False).encode("utf-8")
+    derivative = derivatives.ensure(
+        db,
+        asset=asset,
+        version=version,
+        purpose=PURPOSE_TABLE_PREVIEW,
+        mime="application/json",
+    )
+    path = storage.write_derivative(data, derivative.storage_key)
+    derivative.byte_size = path.stat().st_size
+    derivative.status = DERIVATIVE_READY
+    derivative.updated_at = utcnow()
+
+
+# —— 视频 ——
+
+
+def _video_inspect(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
+    """探测编码并尝试截封面。没有 ffprobe/ffmpeg 就跳过，不影响播放原片。"""
+    version = _version(db, payload)
+    if version is None:
+        return
+    asset = db.get(Asset, version.asset_id)
+    if asset is None or asset.status == ASSET_TRASHED:
+        return
+    source = storage.original_path(version.storage_key)
+    if not source.is_file():
+        raise JobError("原件不存在，无法探测视频")
+
+    try:
+        probe = video.probe(source, container=Path(version.storage_key).suffix)
+    except ExtractionFailed as exc:
+        version.playback = None
+        version.extract_status = EXTRACT_FAILED
+        db.commit()
+        logger.warning("视频探测失败", extra={"version_id": version.id, "error": str(exc)})
+        return
+
+    if probe is None:
+        version.extract_status = EXTRACT_SKIPPED
+        db.commit()
+        return
+
+    version.playback = probe.playback
+    version.width = probe.width or version.width
+    version.height = probe.height or version.height
+    version.duration_ms = probe.duration_ms
+    version.extract_status = EXTRACT_READY
+    db.commit()
+
+    _store_poster(
+        db,
+        storage=storage,
+        asset=asset,
+        version=version,
+        renderer=video.render_poster,
+    )
+
+
+def _store_poster(
+    db: DbSession,
+    *,
+    storage: LocalStorage,
+    asset: Asset,
+    version: AssetVersion,
+    renderer,
+) -> None:
+    """生成封面（视频第一帧或 PDF 首页）。工具缺失时不留记录。"""
+    derivative = derivatives.ensure(
+        db,
+        asset=asset,
+        version=version,
+        purpose=PURPOSE_POSTER,
+        mime="image/jpeg",
+    )
+    if derivative.is_ready:
+        return
+    derivative.status = DERIVATIVE_PENDING
+    db.commit()
+
+    source = storage.original_path(version.storage_key)
+    target = storage.derivative_path(derivative.storage_key)
+    try:
+        produced = renderer(source, target)
+    except Exception as exc:  # 工具自己报错：记失败，不重试
+        _fail_derivative(db, derivative, f"封面生成失败：{exc}")
+        return
+
+    if not produced:
+        # 系统没有对应工具：删掉占位记录，公开 JSON 里自然没有 poster。
+        db.delete(derivative)
+        db.commit()
+        return
+
+    derivative.status = DERIVATIVE_READY
+    derivative.byte_size = target.stat().st_size
+    derivative.updated_at = utcnow()
+    db.commit()
+    publish.link_derivative(db=db, storage=storage, derivative=derivative)
+
+
+def _fail_derivative(db: DbSession, derivative: Derivative, reason: str) -> None:
+    derivative.status = DERIVATIVE_FAILED
+    derivative.byte_size = 0
+    derivative.updated_at = utcnow()
+    db.commit()
+    logger.warning("派生文件生成失败", extra={"derivative_id": derivative.id, "reason": reason})
+
+
+def _version(db: DbSession, payload) -> AssetVersion | None:
+    version_id = str(payload.get("version_id", ""))
+    if not version_id:
+        return None
+    return db.get(AssetVersion, version_id)
 
 
 # —— 定时发布 ——
@@ -166,6 +378,8 @@ def _max_side(settings: Settings, purpose: str) -> int:
 _HANDLERS = {
     jobs.KIND_THUMB: _image_derivative,
     jobs.KIND_DISPLAY: _image_derivative,
+    jobs.KIND_EXTRACT: _content_extract,
+    jobs.KIND_VIDEO: _video_inspect,
     jobs.KIND_PUBLISH_DUE: _publish_due,
     jobs.KIND_CLEANUP: _cleanup,
 }

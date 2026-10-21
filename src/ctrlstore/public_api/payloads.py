@@ -18,9 +18,7 @@ from fastapi import Request
 from ..assets import derivatives, publish, signing
 from ..content import markdown_render
 from ..models import (
-    PURPOSE_DISPLAY,
-    PURPOSE_POSTER,
-    PURPOSE_THUMB,
+    PUBLIC_DERIVATIVE_PURPOSES,
     VISIBILITY_SITE,
     Asset,
     AssetVersion,
@@ -30,9 +28,6 @@ from ..models import (
 )
 from ..storage import LocalStorage
 from .deps import absolute_url
-
-#: 公开 JSON 里会给出地址的派生文件。视频封面在第 9 部分才会生成。
-PUBLIC_DERIVATIVE_PURPOSES = (PURPOSE_THUMB, PURPOSE_DISPLAY, PURPOSE_POSTER)
 
 
 def original_url(request: Request, asset: Asset, version: AssetVersion) -> str:
@@ -49,7 +44,7 @@ def derivative_urls(request: Request, asset: Asset, version: AssetVersion) -> di
     """
     storage = LocalStorage.from_settings(request.app.state.settings)
     urls: dict[str, str] = {}
-    for derivative in derivatives.ready(version):
+    for derivative in derivatives.public_ready(version):
         if derivative.purpose not in PUBLIC_DERIVATIVE_PURPOSES:
             continue
         if not storage.public_derivative_path(asset.id, derivative.purpose).is_file():
@@ -103,6 +98,8 @@ def asset_summary(request: Request, asset: Asset, *, site) -> dict[str, Any]:
         "kind": asset.kind,
         "title": asset.published_title or "",
         "mime": version.mime,
+        # 下载按钮用的原始文件名；公开路径里不出现它（企划第 9 章）。
+        "filename": version.original_filename,
     }
     urls = file_urls(request, asset, site=site)
     if urls:
@@ -111,6 +108,10 @@ def asset_summary(request: Request, asset: Asset, *, site) -> dict[str, Any]:
         payload["width"] = version.width
     if version.height is not None:
         payload["height"] = version.height
+    if version.playback:
+        payload["playback"] = version.playback
+    if version.duration_ms is not None:
+        payload["duration_ms"] = version.duration_ms
     if asset.published_slug:
         payload["slug"] = asset.published_slug
     return payload
@@ -138,6 +139,17 @@ def asset_detail(
     urls = file_urls(request, asset, site=site)
     if urls:
         payload["urls"] = urls
+
+    version = publish.published_version(asset)
+    if version is not None:
+        payload["filename"] = version.original_filename
+        if version.playback:
+            payload["playback"] = version.playback
+        if version.duration_ms is not None:
+            payload["duration_ms"] = version.duration_ms
+        if version.page_count is not None:
+            payload["page_count"] = version.page_count
+        payload["extract_status"] = version.extract_status
 
     if cover is not None:
         cover_urls = file_urls(request, cover, site=site)

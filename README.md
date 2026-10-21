@@ -200,11 +200,14 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | GET | `/api/public/v1/collections/{slug}` | 公开；按可见性过滤条目 |
 | GET | `/api/public/v1/assets/{id}` | 公开；`?format=markdown` 仅站点令牌 |
 | GET | `/api/public/v1/by-slug/{slug}` | 公开；按别名取文章或文本 |
-| GET | `/api/public/v1/assets/{id}/table` | 公开；表格预览（形状已定，第 9 部分填充） |
+| GET | `/api/public/v1/assets/{id}/table` | 公开；xlsx 表名、表头与前 100 行 |
 | GET | `/api/public/v1/files/{id}` | 匿名；凭签名读取，撤回后 404 |
 | POST | `/api/public/v1/pageviews` | 站点令牌；页面访问上报，重复事件不重复计数 |
 | GET | `/api/admin/v1/dashboard` | 所有者；今日、月份、近 12 个月与库存 |
 | GET | `/api/admin/v1/dashboard/day` | 所有者；某日的次数与最多 10 条路径 |
+| GET | `/api/admin/v1/search` | `asset.read`；三字以上全文，一两个字查标题/文件名/标签 |
+| GET | `/api/admin/v1/health` | 所有者；磁盘、队列、迁移版本与上次成功备份 |
+| GET | `/api/public/v1/search` | 站点令牌且配置开启；只搜已发布且该站点能读的内容 |
 
 替换文件没有单独接口：`POST /uploads` 或 `/uploads/direct` 带 `asset_id`，完成后追加为新版本。
 新建与替换共用一条上传路径，避免两套登记规则。
@@ -556,8 +559,10 @@ POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": fa
 | --- | --- |
 | `image.thumb` | 缩略图：最长边 480 的 WebP |
 | `image.display` | 展示图：最长边 1600 的 WebP。任务类型已留好，默认不入队（企划第 8.5 节 D2） |
+| `content.extract` | 文档/文本抽取、xlsx 预览、PDF 首页图 |
+| `video.inspect` | ffprobe 判断能否播放，ffmpeg 截封面 |
 | `publish.due` | 把到点的定时发布送出去 |
-| `maintenance.cleanup` | 过期上传、回收站到期、旧任务记录 |
+| `maintenance.cleanup` | 过期上传、回收站到期、访问明细、旧任务记录 |
 
 ### 缩略图
 
@@ -680,6 +685,133 @@ Windows 开发与测试靠这个包）。
 站点令牌转发；站点令牌只放在网站服务器的环境变量里。预取、`/api` 与 `/p` 请求不上报。
 网站侧的访客标识可以放在自己的 Cookie 里（例如 `cs_vid`），CtrlStore 只收到它的 HMAC。
 
+## 文档抽取与表格预览
+
+文档与文本在入库时排入 `content.extract`；抽取失败不影响原件，发布也不等它完成。
+
+| 类型 | 抽取结果 |
+| --- | --- |
+| `docx` | 段落与表格文本（`python-docx`，只读） |
+| `xlsx` | 表名、表头、每表前 100 行（`openpyxl` 只读模式）+ 预览 JSON |
+| `pdf` | 逐页文本，最多 500 页（`pypdf`）；有 `pdftoppm` 时另存首页图 |
+| `markdown` / `text` | 文件本身就是正文 |
+
+固定上限：解压后 ≤ 200 MB、压缩包条目 ≤ 2000、单文件处理 ≤ 60 秒、PDF ≤ 500 页、
+Excel ≤ 20 表 × 100 行 × 50 列、抽取文本 ≤ 20000 字符（超出截断并标记）。
+超限、加密、损坏、没有文本都属于确定性结果，记 `failed` 或 `skipped` 后结束任务，
+**不重试**——重试解决不了这些问题，只会堵住后面的任务。
+
+`GET /api/public/v1/assets/{id}/table?sheet=0&limit=100` 读已发布版本的预览：
+
+```json
+{"status": "ready", "sheets": ["预算"], "name": "预算",
+ "header": ["项目", "金额"], "rows": [["服务器", "1200"]], "truncated": true}
+```
+
+预览还没生成时同样返回 200，`status` 为 `pending` 或 `failed`，不返回 404。
+预览 JSON 存在 `derivatives/<id>/vN/preview.json`，**不进入 `/p/`**。
+
+公开 JSON 另外补了已发布版本的 `filename`（下载按钮用），以及 `playback`、
+`duration_ms`、`page_count`、`extract_status`。文件名只出现在响应里，不写进 `/p/` 路径。
+
+## 检索
+
+管理端与站点各用一份索引行，存于 SQLite FTS5（trigram 分词，不装中文分词插件）：
+
+* `admin`：编辑中的标题、文件名、别名、标签与**当前版本**正文；
+* `published`：发布快照与**已发布版本**正文。
+
+`GET /api/admin/v1/search?q=…`（`asset.read`）三字及以上查全文，一两个字只查
+标题/文件名/标签，最多 50 条；回收站不出现。
+
+`GET /api/public/v1/search?q=…` 默认关闭（`site_search_enabled = false`），打开后
+必须带站点令牌，并且：
+
+1. 只查 `published` 索引行——草稿、待发布替换、未授权正文都不在其中；
+2. 结果再逐个过 `searchable`：公开可读，仅站点必须在已授权集合里，
+   「未列出」不出现在发现型结果里。
+
+索引在内容变更时整体重建（标题、标签、正文、版本、发布状态、抽取完成），
+所以不存在「改了标题还能搜到旧值」的中间状态。升级时迁移会按现有内容回填一次；
+但在第 9 部分之前入库、从未抽取过的文档没有正文可回填，需要重新导入一版
+（`ctrlstore import --asset-id`）才会进入全文索引。
+
+## 视频
+
+不转码、不改写原件。有 `ffprobe` 时判断能否直接播：
+
+* MP4：H.264（音频 AAC 或没有音频）→ `playable`；
+* WebM：VP8 / VP9 / AV1（音频 Opus、Vorbis 或没有音频）→ `playable`；
+* 其余 → `download_only`，仍保存原件，只承诺可下载。
+
+有 `ffmpeg` 时截一张封面（`-threads 1`，宽度 1280），写成 `poster` 派生文件；
+没有就跳过。封面的公开链接规则与缩略图相同：只有该版本已经在 `/p/` 时才挂出。
+公开地址的扩展名与容器一致（`.mp4` / `.webm`）；仅站点视频仍走签名地址，
+不会因为探测完成而变成 `/p/*.mp4`。
+
+## 配额
+
+`user_quota_bytes` 与 `library_quota_bytes` 默认 0，表示不限。计入：
+
+* 未彻底删除的所有版本（含回收站）；
+* 所有派生文件（缩略图、封面、预览 JSON）。
+
+公开区的硬链接不是新字节，不重复计；临时分片不在库里，只受磁盘阈值约束。
+上传在开会话时按该类型上限预估一次，合并时按真实字节再检查一次。超限返回
+507 `insufficient_storage`，并清理已写入的临时文件。
+
+## 运维：备份、恢复与 systemd
+
+### 备份
+
+`scripts/backup.sh` 是停写备份，必须在维护窗口以 root 运行：
+
+```bash
+sudo CTRLSTORE_DATA_DIR=/var/lib/ctrlstore \
+     CTRLSTORE_BACKUP_DIR=/var/backups/ctrlstore \
+     scripts/backup.sh
+```
+
+它会停掉两个 API 实例与 worker，做 WAL checkpoint、SQLite `.backup`，在同一窗口复制
+`originals/`、`derivatives/` 与配置，最后写 `manifest.json`（应用版本、迁移版本、
+起止时间、文件数）。中途失败的目录会被改名成 `*.failed`，不能当恢复源。
+`public/` 与 `tmp/` 不备份。备份目录应在另一块盘上。
+
+### 恢复
+
+```bash
+sudo scripts/restore.sh /var/backups/ctrlstore/20261021-030000
+```
+
+只接受 `status=complete` 的清单。恢复数据库与文件、修正属主、按已提交的发布快照
+执行 `ctrlstore fsck --fix-public-links`，再启动服务。恢复与升级分开：先回到清单上的
+应用版本，核对集合 API、原图、视频、权限与版本，确认后再单独升级。
+`published_slug` 与 `published_references` 在数据库里，随 SQLite 备份走，恢复脚本
+不会用编辑中的 `slug` 或 `asset_references` 重写它们。
+
+### systemd
+
+`deploy/systemd/` 下三个文件：
+
+```bash
+sudo install -m 0644 deploy/systemd/ctrlstore-api.slice \
+    deploy/systemd/ctrlstore-api@.service deploy/systemd/ctrlstore-worker.service \
+    /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ctrlstore-api.slice ctrlstore-api@0 ctrlstore-api@1 ctrlstore-worker
+```
+
+`ctrlstore-api@0` 监听 8000，`@1` 监听 8001，两者同属 `ctrlstore-api.slice`，
+合计内存上限 512M；worker 单独一个进程，`MemoryMax=768M`。密钥放
+`/etc/ctrlstore/secrets.env`（`VAR=value`，0600），systemd 用 `EnvironmentFile` 读。
+Nginx 示例的上游已指向这两个端口。
+
+### 健康
+
+`GET /healthz` 仍然只返回 `{"status":"ok"|"degraded"}`。所有者的
+`GET /api/admin/v1/health` 另给磁盘剩余/总量、队列状态计数、应用与迁移版本、
+上次成功备份（读 `backup_dir` 下最新完整清单）。
+
 ## 数据库
 
 SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON`、`synchronous=NORMAL`、
@@ -692,7 +824,7 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
 `0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本，
 `0005` 集合与站点授权，`0006` 发布快照补别名与图片引用，`0007` 后台任务、派生文件与定时发布，
-`0008` 访问统计（日汇总、事件、访客与路径）。
+`0008` 访问统计（日汇总、事件、访客与路径），`0009` 全文检索（FTS5）与派生文件字节。
 「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」「同一集合内同一内容只出现一次、
 位置唯一」「已发布别名唯一」都由库层约束兜底，不只靠应用代码。
 时间一律按 UTC 存不带时区的值。

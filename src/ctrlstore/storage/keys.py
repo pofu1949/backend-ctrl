@@ -19,11 +19,20 @@ KEY_PATTERN = re.compile(r"^[0-9a-z]{2}/[0-9a-z-]{36}/v[1-9][0-9]*/original\.[a-
 
 #: 派生键。文件名由用途决定，不含原件扩展名：缩略图永远是 WebP。
 DERIVATIVE_PATTERN = re.compile(
-    r"^[0-9a-z]{2}/[0-9a-z-]{36}/v[1-9][0-9]*/(?:thumb\.webp|display\.webp|poster\.jpg)$"
+    r"^[0-9a-z]{2}/[0-9a-z-]{36}/v[1-9][0-9]*/"
+    r"(?:thumb\.webp|display\.webp|poster\.jpg|preview\.json)$"
 )
 
 #: 派生用途 → 文件名。与 ``models.DERIVATIVE_FILENAMES`` 保持一致。
 DERIVATIVE_FILENAMES: dict[str, str] = {
+    "thumb": "thumb.webp",
+    "display": "display.webp",
+    "poster": "poster.jpg",
+    "table_preview": "preview.json",
+}
+
+#: 会出现在 ``/p/`` 下的派生用途 → 文件名。表格预览不公开。
+PUBLIC_DERIVATIVE_FILENAMES: dict[str, str] = {
     "thumb": "thumb.webp",
     "display": "display.webp",
     "poster": "poster.jpg",

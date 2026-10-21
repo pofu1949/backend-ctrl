@@ -62,6 +62,17 @@ display_max_side = 1600
 # 每个站点令牌每分钟最多接受多少条页面访问上报。网站转发量远低于这个数。
 pageview_rate_per_minute = 600
 
+# —— 配额（第 9 部分）——
+# 0 表示不限。计入未彻底删除的所有版本与派生文件，含回收站；硬链接不重复计。
+user_quota_bytes = 0        # 单个账号，例如 42949672960（40 GB）
+library_quota_bytes = 0     # 全库，例如 214748364800（200 GB）
+
+# —— 运维（第 9 部分）——
+# 备份脚本默认写到 /var/backups/ctrlstore；所有者健康接口读这里最新的成功清单。
+backup_dir = "/var/backups/ctrlstore"
+# 站点搜索默认关闭。打开后只搜已发布、且该站点能读到的内容。
+site_search_enabled = false
+
 # —— 进程 ——
 log_level = "INFO"
 api_host = "127.0.0.1"

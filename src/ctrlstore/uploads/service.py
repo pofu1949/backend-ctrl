@@ -18,7 +18,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
 
-from .. import audit, idempotency
+from .. import audit, idempotency, quota
 from ..assets import service as assets
 from ..config import Settings
 from ..errors import ApiError
@@ -81,6 +81,13 @@ def create_session(
     _ensure_capacity(settings)
 
     kind, _ = _kind_or_invalid(filename)
+    # 早拒绝：按该类型的单文件上限预估，省掉一整段传输（企划第 8.3 节 U6）。
+    quota.ensure_capacity(
+        db,
+        settings=settings,
+        owner_id=actor.id,
+        extra_bytes=settings.limits.for_kind(kind),
+    )
     _ensure_slot_available(db, actor)
     if target_asset_id:
         _ensure_target_replaceable(db, target_asset_id, kind=kind)
@@ -195,6 +202,10 @@ def complete(
             byte_size=size,
         )
         _ensure_capacity(settings)
+        # 合并后再按真实字节数检查一次：开会话时用的是上限预估。
+        quota.ensure_capacity(
+            db, settings=settings, owner_id=session.actor_id, extra_bytes=result.byte_size
+        )
 
         # 登记与落盘一起完成：新内容或该内容的新版本，规则都在 assets.service。
         asset, version = assets.register_upload(

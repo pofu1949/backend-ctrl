@@ -6,15 +6,17 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
-from ..assets import markdown, publish
+from ..assets import derivatives, markdown, publish
 from ..auth import deps as auth_deps
 from ..content import markdown_render
 from ..errors import ApiError
-from ..models import ASSET_PUBLISHED, Asset
+from ..models import ASSET_PUBLISHED, PURPOSE_TABLE_PREVIEW, Asset
 from ..storage import LocalStorage
 from ..uploads.inspection import KIND_MARKDOWN, KIND_TEXT, KIND_XLSX
 from . import deps, payloads
@@ -71,17 +73,51 @@ def read_table(
     db: DbSession = Depends(auth_deps.get_db),
     site=Depends(deps.site_from_request),
 ) -> Response:
-    """表格预览。响应形状先定下来，内容在第 9 部分填（企划第 8.5 节 D5）。"""
+    """表格预览：表名、表头与每表前若干行（企划第 8.5 节 D5、场景 D）。
+
+    预览由抽取任务生成；还没生成时返回 200 + ``status``，不是 404——
+    「内容可读，预览稍后」与「内容不存在」是两件事。
+    """
     asset = _readable_asset(db, asset_id, site=site)
     if asset.kind != KIND_XLSX:
         raise ApiError.invalid("只有 xlsx 有表格预览")
 
+    version = publish.published_version(asset)
+    if version is None:
+        raise ApiError.conflict("内容尚无已发布版本")
+
+    derivative = derivatives.for_version(db, version.id, PURPOSE_TABLE_PREVIEW)
+    if derivative is None or not derivative.is_ready:
+        payload = {
+            "asset_id": asset.id,
+            "status": derivative.status if derivative else "pending",
+            "sheet": sheet,
+            "limit": limit,
+            "sheets": [],
+            "header": [],
+            "rows": [],
+            "truncated": False,
+        }
+        return deps.json_response(request, site=site, payload=payload)
+
+    storage = LocalStorage.from_settings(request.app.state.settings)
+    data = json.loads(storage.derivative_path(derivative.storage_key).read_text("utf-8"))
+    sheets = data.get("sheets", [])
+    if sheet >= len(sheets):
+        raise ApiError.invalid(f"工作表序号超出范围（共 {len(sheets)} 个）")
+
+    selected = sheets[sheet]
+    rows = selected.get("rows", [])
     payload = {
         "asset_id": asset.id,
-        "sheets": [],
+        "status": "ready",
         "sheet": sheet,
         "limit": limit,
-        "note": "表格预览在第 9 部分实现",
+        "sheets": [item.get("name", "") for item in sheets],
+        "name": selected.get("name", ""),
+        "header": selected.get("header", []),
+        "rows": rows[:limit],
+        "truncated": bool(selected.get("truncated")) or len(rows) > limit,
     }
     return deps.json_response(request, site=site, payload=payload)
 

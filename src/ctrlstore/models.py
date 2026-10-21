@@ -298,13 +298,19 @@ DERIVATIVE_SKIPPED = "skipped"
 PURPOSE_THUMB = "thumb"
 PURPOSE_DISPLAY = "display"
 PURPOSE_POSTER = "poster"
+#: Excel 预览 JSON。不是公开文件，只在表格预览接口里读。
+PURPOSE_TABLE_PREVIEW = "table_preview"
 
-#: 派生文件的用途 → 公开区里的文件名。扩展名随用途固定，不随原件变化。
+#: 派生文件的用途 → 文件名。扩展名随用途固定，不随原件变化。
 DERIVATIVE_FILENAMES = {
     PURPOSE_THUMB: "thumb.webp",
     PURPOSE_DISPLAY: "display.webp",
     PURPOSE_POSTER: "poster.jpg",
+    PURPOSE_TABLE_PREVIEW: "preview.json",
 }
+
+#: 会出现在 ``/p/`` 下的派生用途。表格预览只在 API 里返回，不挂公开文件。
+PUBLIC_DERIVATIVE_PURPOSES = (PURPOSE_THUMB, PURPOSE_DISPLAY, PURPOSE_POSTER)
 
 #: 抽取状态。第 4 部分只用到 pending；第 9 部分填 ready/failed/skipped。
 EXTRACT_PENDING = "pending"
@@ -508,6 +514,8 @@ class Derivative(Base):
     #: 相对 ``derivatives/`` 的键，例如 ``aa/<id>/v1/thumb.webp``。
     storage_key: Mapped[str] = mapped_column(String(255), unique=True)
     status: Mapped[str] = mapped_column(String(16), default=DERIVATIVE_PENDING)
+    #: 派生文件字节数，配额统计用。未知或未生成时为 0。
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

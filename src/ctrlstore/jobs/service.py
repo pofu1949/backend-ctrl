@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Connection, Engine, case, delete, or_, select, update
+from sqlalchemy import Connection, Engine, case, delete, func, or_, select, update
 from sqlalchemy.orm import Session as DbSession
 
 from ..models import (
@@ -35,6 +35,10 @@ from ..models import (
 KIND_THUMB = "image.thumb"
 #: 展示图：第 7 部分只留任务类型，默认不入队。
 KIND_DISPLAY = "image.display"
+#: 文本抽取与表格预览（第 9 部分）。
+KIND_EXTRACT = "content.extract"
+#: 视频探测与封面（第 9 部分）。
+KIND_VIDEO = "video.inspect"
 #: 每分钟一次：把到点的定时发布送出去。
 KIND_PUBLISH_DUE = "publish.due"
 #: 每小时一次：过期上传、回收站到期、旧任务记录。
@@ -163,6 +167,14 @@ def list_jobs(db: DbSession, *, status: str | None = None, limit: int = 50) -> l
     if status:
         statement = statement.where(Job.status == status)
     return list(db.scalars(statement.limit(max(1, min(limit, 200)))).all())
+
+
+def counts(db: DbSession) -> dict[str, int]:
+    """按状态统计队列。所有者健康接口用它看有没有卡住的任务。"""
+    result = {JOB_PENDING: 0, JOB_RUNNING: 0, JOB_DONE: 0, JOB_FAILED: 0}
+    rows = db.execute(select(Job.status, func.count()).group_by(Job.status)).all()
+    result.update({status: count for status, count in rows})
+    return result
 
 
 def purge_finished(db: DbSession, *, days: int = FINISHED_RETENTION_DAYS) -> int:

@@ -1,0 +1,35 @@
+# CtrlStore API 模板单元。实例 %i 只用于取端口：
+#   ctrlstore-api@0 -> 127.0.0.1:8000
+#   ctrlstore-api@1 -> 127.0.0.1:8001
+# 两个实例同属 ctrlstore-api.slice，合计内存上限 512M（见该 slice 单元）。
+#
+# 安装：
+#   install -m 0644 ctrlstore-api.slice ctrlstore-api@.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now ctrlstore-api.slice ctrlstore-api@0 ctrlstore-api@1
+#
+# 密钥放在 /etc/ctrlstore/secrets.env（VAR=value，权限 0600），不要写进 TOML。
+[Unit]
+Description=CtrlStore API（实例 %i）
+After=network.target
+
+[Service]
+Type=simple
+User=ctrlstore
+Group=ctrlstore
+WorkingDirectory=/var/lib/ctrlstore
+EnvironmentFile=-/etc/ctrlstore/secrets.env
+ExecStart=/opt/ctrlstore/.venv/bin/ctrlstore serve --port 800%i
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+Slice=ctrlstore-api.slice
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ctrlstore
+
+[Install]
+WantedBy=multi-user.target

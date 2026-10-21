@@ -20,11 +20,13 @@ from pathlib import Path
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as DbSession
 
-from .. import audit
+from .. import audit, quota
 from ..config import Settings
+from ..content import schedule as content_schedule
 from ..errors import ApiError
 from ..models import (
     ASSET_DRAFT,
+    EXTRACT_SKIPPED,
     VISIBILITY_PRIVATE,
     Asset,
     AssetReference,
@@ -35,6 +37,7 @@ from ..models import (
     User,
     utcnow,
 )
+from ..search import service as search
 from ..storage import LocalStorage, keys
 from ..uploads.inspection import KIND_IMAGE, KIND_MARKDOWN, KIND_TEXT, KIND_VIDEO, Inspection
 from . import derivatives, markdown
@@ -110,11 +113,16 @@ def register_upload(
     if version_no > 1:
         asset.revision += 1
     asset.updated_at = utcnow()
+    # 图片没有文本可抽，直接标 skipped，避免状态永远停在 pending。
+    if asset.kind == KIND_IMAGE:
+        version.extract_status = EXTRACT_SKIPPED
 
     prune_versions(db, storage=storage, asset=asset, settings=settings)
     # 图片入库后立刻排缩略图；发布不依赖它完成（企划第 8.5 节 D1）。
     if asset.kind == KIND_IMAGE:
         derivatives.schedule_thumbnail(db, asset=asset, version=version)
+    # 文档与文本排抽取；同样不挡发布（企划第 9 章）。
+    content_schedule.schedule(db, asset=asset, version=version)
     audit.record(
         db,
         action=audit.ASSET_VERSION_ADDED if version_no > 1 else audit.ASSET_CREATED,
@@ -129,6 +137,7 @@ def register_upload(
             "bytes": inspection.byte_size,
         },
     )
+    search.refresh(db, asset)
     return asset, version
 
 
@@ -163,6 +172,9 @@ def create_text(
     limit = settings.limits.for_kind(kind)
     if len(data) > limit:
         raise ApiError.too_large(f"正文超过 {kind} 的上限（{limit} 字节）")
+    quota.ensure_capacity(
+        db, settings=settings, owner_id=actor.id, extra_bytes=len(data)
+    )
 
     asset = Asset(
         kind=kind,
@@ -197,6 +209,7 @@ def create_text(
     asset.versions.append(version)
     db.flush()
     asset.current_version_id = version.id
+    content_schedule.schedule(db, asset=asset, version=version)
 
     tag_names = list(tags) or (parsed.tags if parsed else [])
     if tag_names:
@@ -214,6 +227,7 @@ def create_text(
         target_id=asset.id,
         detail={"kind": kind, "bytes": len(data)},
     )
+    search.refresh(db, asset)
     return asset, version
 
 
@@ -280,6 +294,7 @@ def apply_update(
         target_id=asset.id,
         detail={"fields": sorted(applied)},
     )
+    search.refresh(db, asset)
     return asset
 
 
@@ -313,6 +328,7 @@ def _write_body(
     asset.versions.append(version)
     db.flush()
     asset.current_version_id = version.id
+    content_schedule.schedule(db, asset=asset, version=version)
 
     parsed = markdown.parse(body) if asset.kind == KIND_MARKDOWN else None
     if parsed is not None:

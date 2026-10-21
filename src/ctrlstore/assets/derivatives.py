@@ -17,6 +17,8 @@ from ..jobs import service as jobs
 from ..models import (
     DERIVATIVE_PENDING,
     DERIVATIVE_READY,
+    PUBLIC_DERIVATIVE_PURPOSES,
+    PURPOSE_TABLE_PREVIEW,
     PURPOSE_THUMB,
     Asset,
     AssetVersion,
@@ -30,6 +32,7 @@ MIME_BY_PURPOSE = {
     "thumb": "image/webp",
     "display": "image/webp",
     "poster": "image/jpeg",
+    PURPOSE_TABLE_PREVIEW: "application/json",
 }
 
 
@@ -45,6 +48,11 @@ def for_version(db: DbSession, version_id: str, purpose: str) -> Derivative | No
 def ready(version: AssetVersion) -> list[Derivative]:
     """该版本已经生成好的派生文件。公开区与响应都只认这一份。"""
     return [item for item in version.derivatives if item.status == DERIVATIVE_READY]
+
+
+def public_ready(version: AssetVersion) -> list[Derivative]:
+    """会进入 ``/p/`` 的那几份派生文件（不含表格预览这类只走 API 的）。"""
+    return [item for item in ready(version) if item.purpose in PUBLIC_DERIVATIVE_PURPOSES]
 
 
 def schedule_thumbnail(db: DbSession, *, asset: Asset, version: AssetVersion) -> Derivative:

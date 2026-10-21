@@ -6,7 +6,9 @@
 # 备案完成、证书就位后，取消最后的 TLS 段并改域名。此前 HTTP 只用于本机或局域网。
 
 upstream ctrlstore_api {
+    # 两个 API 进程由 systemd 的 ctrlstore-api@0 / @1 启动，端口分别是 8000 / 8001。
     server 127.0.0.1:8000;
+    server 127.0.0.1:8001;
     keepalive 16;
 }
 

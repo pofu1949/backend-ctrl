@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     #: 每个站点令牌每分钟最多接受多少条上报。网站的转发请求远低于这个量。
     pageview_rate_per_minute: int = 600
 
+    # —— 配额（第 9 部分）。0 表示不限 ——
+    #: 单个账号的字节配额。含历史版本、派生文件与回收站。
+    user_quota_bytes: int = 0
+    #: 全库字节配额。口径同上。
+    library_quota_bytes: int = 0
+
+    # —— 运维（第 9 部分）——
+    #: 备份根目录。所有者健康接口读这里最新的成功清单；脚本默认 /var/backups/ctrlstore。
+    backup_dir: Path | None = None
+    #: 站点搜索默认关闭；打开后只搜已发布、且该站点能读到的内容。
+    site_search_enabled: bool = False
+
     # —— 会话与 Cookie ——
     #: 绝对有效期（小时），从登录算起。
     session_absolute_hours: int = 12
@@ -152,6 +164,7 @@ class Settings(BaseSettings):
         "derivatives_dir",
         "public_dir",
         "tmp_dir",
+        "backup_dir",
     )
     @classmethod
     def _absolute_path(cls, value: Path | None) -> Path | None:
@@ -189,6 +202,13 @@ class Settings(BaseSettings):
     def _positive_int(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("必须是正整数")
+        return value
+
+    @field_validator("user_quota_bytes", "library_quota_bytes")
+    @classmethod
+    def _non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("不能为负数；0 表示不限")
         return value
 
     @field_validator("log_level")

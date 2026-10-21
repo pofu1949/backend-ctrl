@@ -124,9 +124,9 @@ class LocalStorage:
         派生地址不带版本号：网站只引用「当前这一版」的缩略图，具体是哪一版由
         发布快照决定，路径保持稳定。
         """
-        filename = keys.DERIVATIVE_FILENAMES.get(purpose)
+        filename = keys.PUBLIC_DERIVATIVE_FILENAMES.get(purpose)
         if filename is None:
-            raise ValueError(f"未知派生用途：{purpose}")
+            raise ValueError(f"该派生用途不进入公开区：{purpose}")
         return self.public_dir_for(asset_id) / filename
 
     def session_dir(self, session_id: str) -> Path:
@@ -201,6 +201,16 @@ class LocalStorage:
         先写临时文件再改名，和上传一样不会留下半个文件。
         """
         destination = self.original_path(key)
+        self._write_atomic(destination, data)
+        return destination
+
+    def write_derivative(self, data: bytes, key: str) -> Path:
+        """写派生文件（表格预览这类由抽取生成的 JSON）。同样先写临时文件。"""
+        destination = self.derivative_path(key)
+        self._write_atomic(destination, data)
+        return destination
+
+    def _write_atomic(self, destination: Path, data: bytes) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging_dir = self.tmp_dir / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +220,6 @@ class LocalStorage:
             os.replace(staging, destination)
         finally:
             staging.unlink(missing_ok=True)
-        return destination
 
     def hash_file(self, path: Path) -> tuple[str, int]:
         """流式计算哈希与字节数。"""

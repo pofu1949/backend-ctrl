@@ -47,6 +47,7 @@ from ..models import (
     User,
     utcnow,
 )
+from ..search import service as search
 from ..storage import LocalStorage, keys
 from . import derivatives, markdown
 from .service import clean_slug
@@ -127,7 +128,11 @@ def desired_links(asset: Asset) -> Links | None:
     version = published_version(asset)
     if version is None:
         return None
-    return Links(asset_id=asset.id, version=version, derivatives=tuple(derivatives.ready(version)))
+    return Links(
+        asset_id=asset.id,
+        version=version,
+        derivatives=tuple(derivatives.public_ready(version)),
+    )
 
 
 def publish(
@@ -160,6 +165,7 @@ def publish(
     if asset.status == ASSET_PUBLISHED and _snapshot_matches(asset, snapshot):
         # 手动发布覆盖掉可能残留的定时；宿主事务会把它一起提交。
         asset.publish_at = None
+        search.refresh(db, asset)
         return asset
 
     for name, value in snapshot.items():
@@ -181,6 +187,8 @@ def publish(
             "slug": asset.published_slug,
         },
     )
+    # 发布行换成发布快照 + 已发布版本正文；索引与状态同一事务提交。
+    search.refresh(db, asset)
 
     # 先提交状态再动文件：链接失败只会让公开地址 404，不会泄露未发布内容。
     try:
@@ -322,6 +330,7 @@ def unpublish(
         target_type=audit.TARGET_ASSET,
         target_id=asset.id,
     )
+    search.refresh(db, asset)
     return asset
 
 
@@ -341,6 +350,7 @@ def archive(
     audit.record_for_user(
         db, actor, action=audit.ASSET_ARCHIVED, target_type=audit.TARGET_ASSET, target_id=asset.id
     )
+    search.refresh(db, asset)
     return asset
 
 
@@ -361,6 +371,7 @@ def trash(
     audit.record_for_user(
         db, actor, action=audit.ASSET_TRASHED, target_type=audit.TARGET_ASSET, target_id=asset.id
     )
+    search.refresh(db, asset)
     return asset
 
 
@@ -421,6 +432,7 @@ def purge(db: DbSession, *, storage: LocalStorage, asset: Asset, actor: User | N
         storage.discard_original(version.storage_key)
     storage.clear_public(asset.id)
     _record(db, actor, audit.ASSET_PURGED, asset, detail={"kind": asset.kind})
+    search.remove(db, asset.id)
     db.delete(asset)
 
 
