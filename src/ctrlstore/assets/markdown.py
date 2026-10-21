@@ -1,12 +1,16 @@
-"""Markdown 的 front matter 与正文引用解析。
+"""Markdown 的 front matter 与正文图片解析。
 
 第 4 部分只做两件事：把 YAML front matter 映射到内容字段，以及把正文里的
-本库图片地址解析成内容 ID。渲染与消毒是第 6 部分的事——这里不产生 HTML。
+**图片**地址解析成内容 ID。渲染与消毒是第 6 部分的事——这里不产生 HTML。
 
-引用的写法（企划第 8.4 节 T4）：
-* ``/p/<uuid>/original.jpg``，或带域名的完整地址；
-* ``asset:<uuid>``，便于草稿阶段先占位。
-外站图片与外链不在本库范围内，第 6 部分渲染时会被去掉。
+图片的写法（企划第 8.4 节 T4）：
+
+* ``![说明](/p/<uuid>/original.jpg)``，或带域名的完整地址；
+* ``![说明](asset:<uuid>)``，便于草稿阶段先占位；
+* 直接写在 HTML 里的 ``<img src="…">``。
+
+只认图片：``[手册](/p/<uuid>/original.txt)`` 是下载链接，不受「图片必须已发布」约束。
+代码块与行内代码里的同样文字不算引用。
 """
 
 from __future__ import annotations
@@ -23,6 +27,15 @@ _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 _PUBLIC_PATH = re.compile(rf"/p/({_UUID})/")
 #: 草稿阶段用的占位写法。
 _ASSET_SCHEME = re.compile(rf"asset:({_UUID})")
+
+#: 围栏代码块：解析引用前先摘掉，避免把示例文字当成真实引用。
+_FENCED_CODE = re.compile(r"^(```|~~~).*?^\1\s*$", re.DOTALL | re.MULTILINE)
+#: 行内代码。
+_INLINE_CODE = re.compile(r"`[^`\n]*`")
+#: Markdown 图片语法：``![说明](地址)``。
+_IMAGE_SYNTAX = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+#: HTML 里的 img 标签。
+_HTML_IMAGE = re.compile(r"<img\b[^>]*?\bsrc=\"([^\"]*)\"", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -53,13 +66,30 @@ def parse(text: str) -> Parsed:
     )
 
 
-def referenced_ids(body: str) -> list[str]:
-    """正文中引用的内容 ID，按出现顺序去重。"""
+def image_ids(body: str) -> list[str]:
+    """正文里作为**图片**引用的内容 ID，按出现顺序去重。
+
+    只解析图片语法与 ``<img src>``：写作 ``[手册](/p/<id>/original.txt)`` 的下载
+    链接不会被算进来，因此不会因为「目标不是图片」被挡在发布之外。
+    代码块与行内代码先摘掉，里面的示例文字不算引用。
+    """
+    text = _INLINE_CODE.sub("", _FENCED_CODE.sub("", body))
     found: dict[str, None] = {}
-    for pattern in (_PUBLIC_PATH, _ASSET_SCHEME):
-        for match in pattern.finditer(body):
-            found.setdefault(match.group(1).lower(), None)
+    for pattern in (_IMAGE_SYNTAX, _HTML_IMAGE):
+        for match in pattern.finditer(text):
+            asset_id = _id_in_url(match.group(1))
+            if asset_id is not None:
+                found.setdefault(asset_id, None)
     return list(found)
+
+
+def _id_in_url(url: str) -> str | None:
+    """从一个图片地址里取内容 ID；外站地址返回 ``None``。"""
+    for pattern in (_ASSET_SCHEME, _PUBLIC_PATH):
+        match = pattern.search(url)
+        if match:
+            return match.group(1).lower()
+    return None
 
 
 def cover_id(value: str | None) -> str | None:

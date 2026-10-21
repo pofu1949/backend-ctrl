@@ -27,6 +27,7 @@ TARGET_UPLOAD = "upload"
 TARGET_FOLDER = "folder"
 TARGET_TAG = "tag"
 TARGET_ASSET = "asset"
+TARGET_COLLECTION = "collection"
 
 #: 已知动作。集中列出，避免日志和界面里出现拼错的动作名。
 LOGIN = "login"
@@ -57,6 +58,12 @@ ASSET_ARCHIVED = "asset_archived"
 ASSET_TRASHED = "asset_trashed"
 ASSET_RESTORED = "asset_restored"
 ASSET_PURGED = "asset_purged"
+COLLECTION_CREATED = "collection_created"
+COLLECTION_UPDATED = "collection_updated"
+COLLECTION_ITEM_ADDED = "collection_item_added"
+COLLECTION_ITEM_REMOVED = "collection_item_removed"
+SITE_GRANT_ADDED = "site_grant_added"
+SITE_GRANT_REMOVED = "site_grant_removed"
 
 
 def record(

@@ -174,7 +174,7 @@ def create_text(
         title=final_title[:255],
         summary=(summary or (parsed.summary if parsed else None) or "")[:1024],
         language=(parsed.language if parsed and parsed.language else "zh-CN"),
-        slug=_clean_slug(slug or (parsed.slug if parsed else None)),
+        slug=clean_slug(slug or (parsed.slug if parsed else None)),
         status=ASSET_DRAFT,
         visibility=VISIBILITY_PRIVATE,
         revision=1,
@@ -333,7 +333,7 @@ def _apply_front_matter(
     applied: dict[str, object] = {}
     candidates = {
         "title": (parsed.title[:255] if parsed.title else None),
-        "slug": _clean_slug(parsed.slug),
+        "slug": clean_slug(parsed.slug),
         "summary": (parsed.summary[:1024] if parsed.summary else None),
         "language": parsed.language,
         "cover_asset_id": resolve_cover(db, markdown.cover_id(parsed.cover)),
@@ -356,7 +356,7 @@ def _apply_changes(db: DbSession, asset: Asset, changes: dict[str, object]) -> d
         elif name == "cover_asset_id":
             value = resolve_cover(db, _as_str(value))
         elif name == "slug":
-            value = _clean_slug(_as_str(value))
+            value = clean_slug(_as_str(value))
         elif isinstance(value, str):
             value = value.strip()
         if getattr(asset, name) != value:
@@ -375,8 +375,12 @@ def set_tags(db: DbSession, asset: Asset, names: Iterable[str], *, actor: User) 
 
 
 def refresh_references(db: DbSession, asset: Asset, *, body: str) -> None:
-    """重算正文引用的图片。只记录库里确实存在且是图片的内容。"""
-    ids = markdown.referenced_ids(body)
+    """重算正文引用的图片。只记录库里确实存在且是图片的内容。
+
+    用 ``image_ids`` 而不是全文扫 ID：下载链接（``[手册](/p/<id>/original.txt)``）
+    不是图片引用，不该出现在这张表里。
+    """
+    ids = markdown.image_ids(body)
     current = db.scalars(
         select(AssetReference).where(AssetReference.from_asset_id == asset.id)
     ).all()
@@ -573,7 +577,8 @@ def _folder_id(db: DbSession, folder_id: str | None) -> str | None:
     return folder_id
 
 
-def _clean_slug(value: str | None) -> str | None:
+def clean_slug(value: str | None) -> str | None:
+    """别名只去空白与截断；唯一性由发布时那条部分唯一索引保证。"""
     clean = (value or "").strip()
     return clean[:128] or None
 

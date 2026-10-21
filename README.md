@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 5 部分（发布与公开文件）已完成**。公开读取 API（集合、文章）、缩略图、管理页面尚未实现。
+当前进度：**第 6 部分（集合与网站只读契约）已完成**。缩略图与派生、后台任务、管理页面尚未实现。
 
 ## 目录
 
@@ -34,7 +34,7 @@ backend_ctrl/
       deps.py               身份解析与权限检查的唯一入口
     storage/                存储层（对象键 + 本地文件系统）
       keys.py               storage_key 生成与校验
-      local.py              分片写入、合并、落盘、清理
+      local.py              分片写入、合并、落盘、公开链接、清理
     uploads/                上传
       inspection.py         文件头识别、类型一致性、像素与大小上限
       service.py            会话、分片、合并、直传、过期清理
@@ -48,13 +48,20 @@ backend_ctrl/
       service.py            登记、元数据、版本替换与保留、引用维护
       publish.py            发布/撤回/归档/回收站/恢复 + 公开链接
       signing.py            短时签名地址
-      download.py           私有下载（X-Forwarded 或直接发送）
+      download.py           私有下载（X-Accel-Redirect 或直接发送）
       router.py schemas.py  管理接口 /assets
+    collections/            集合与站点授权
+      service.py            集合 CRUD、排序、前缀匹配
+      router.py schemas.py  管理接口 /collections、/sites/{id}/grants
+    content/                内容处理
+      markdown_render.py    Markdown 渲染与 HTML 消毒
     public_api/             公开接口 /api/public
-      files.py              签名下载
+      deps.py               站点身份与可见性判定（单一入口）
+      payloads.py           公开响应形状
+      collections.py assets.py files.py
     fsck.py                 一致性检查
-    content/ imaging/       后续部分按此分层填充
-  alembic/                  迁移脚本（0001 基线 … 0004 内容）
+    imaging/                第 7 部分
+  alembic/                  迁移脚本（0001 基线 … 0006 发布快照）
   deploy/
     nginx/ctrlstore.conf.example
     systemd/                第 9 部分
@@ -179,6 +186,19 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | DELETE | `/api/admin/v1/assets/{id}` | 所有者；彻底删除（须已在回收站） |
 | GET | `/api/admin/v1/assets/{id}/file` | `asset.read`；任意状态下载原件（支持 Range） |
 | GET | `/api/admin/v1/assets/{id}/signed-url` | `asset.read`；给已发布内容签短时地址 |
+| GET | `/api/admin/v1/collections` | `asset.read`；按别名排序 |
+| POST | `/api/admin/v1/collections` | `collection.manage`；建集合（别名如 `home.hero`） |
+| PATCH | `/api/admin/v1/collections/{id}` | `collection.manage`；改标题或类型限制 |
+| GET/POST | `/api/admin/v1/collections/{id}/items` | `asset.read` / `collection.manage`；条目 |
+| DELETE | `/api/admin/v1/collections/{id}/items/{asset_id}` | `collection.manage`；移除条目 |
+| PATCH | `/api/admin/v1/collections/{id}/items/{asset_id}` | `collection.manage`；改这一处的展示标题 |
+| PUT | `/api/admin/v1/collections/{id}/order` | `collection.manage`；整体重排，一次事务 |
+| GET/POST | `/api/admin/v1/sites/{id}/grants` | 所有者；站点可读的集合前缀 |
+| DELETE | `/api/admin/v1/sites/{id}/grants/{grant_id}` | 所有者 |
+| GET | `/api/public/v1/collections/{slug}` | 公开；按可见性过滤条目 |
+| GET | `/api/public/v1/assets/{id}` | 公开；`?format=markdown` 仅站点令牌 |
+| GET | `/api/public/v1/by-slug/{slug}` | 公开；按别名取文章或文本 |
+| GET | `/api/public/v1/assets/{id}/table` | 公开；表格预览（形状已定，第 9 部分填充） |
 | GET | `/api/public/v1/files/{id}` | 匿名；凭签名读取，撤回后 404 |
 
 替换文件没有单独接口：`POST /uploads` 或 `/uploads/direct` 带 `asset_id`，完成后追加为新版本。
@@ -365,7 +385,7 @@ public/<asset_id>/v/<n>/original.png    同一版本（地址 /p/<id>/v/<n>/orig
 | 转私有 / 转公开 | `asset.publish`（已发布内容改可见性） | 按新可见性增删链接 |
 | 进回收站 | `asset.trash` | 删链接 → 标 `trashed` |
 | 恢复 | `asset.trash` | 只改状态，**不自动重新公开** |
-| 彻底删除 | 仅所有者 | 须已在回收站；有内容把它当封面时拒绝并列出引用 |
+| 彻底删除 | 仅所有者 | 须已在回收站；被别的内容当封面（编辑中或已发布）、或被任何集合包含时拒绝并列出引用 |
 
 失败一律落在「更不可访问」这一侧：发布时先提交状态再建链接（链接失败 = 公开地址 404，
 不会泄露未发布内容）；撤回时先删链接再提交状态（提交失败也只是 404）。残留的链接由
@@ -412,6 +432,101 @@ ctrlstore fsck --skip-hashes        # 文件多时跳过哈希比对
 哈希或大小不一致、残留的 `.tmp` 链接。`--fix-public-links` **只**动公开区，
 不删任何原件，也不会把已撤回或回收站里的内容重新公开。发现问题时退出码为 1。
 
+## 集合与网站读取
+
+### 集合
+
+```bash
+POST /api/admin/v1/collections              {"slug": "home.hero", "title": "首页主视觉"}
+POST /api/admin/v1/collections/{id}/items   {"asset_id": "…", "caption": "秋季主图"}
+PUT  /api/admin/v1/collections/{id}/order   {"asset_ids": ["…", "…"]}
+```
+
+别名全局唯一、只能用小写字母/数字/点/连字符；同一集合里同一内容只出现一次；
+位置在集合内唯一，所以重排先把旧值挪到偏移区、再写 0..n-1，整次事务提交——
+顺序要么全对，要么完全不变。`allowed_kinds` 可以限制集合只收某几类内容，
+收紧限制时会先确认现有条目都符合，否则 409。
+
+### 站点授权与前缀
+
+```bash
+POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": false}
+```
+
+前缀按**点号分段**匹配：`home` 覆盖 `home.hero`，不覆盖 `homepage`。
+`can_read_unlisted` 决定该站点的集合列表里要不要出现「未列出」内容。
+
+### 公开读取与可见性
+
+| 可见性 | 匿名 | 站点令牌 |
+| --- | --- | --- |
+| `public` | 可读，给 `/p/` 原图地址 | 可读，给 `/p/` 原图地址 |
+| `unlisted` | 知道完整地址可读，集合不列出 | 可读；集合里列出需 `can_read_unlisted` |
+| `site` | 不可读 | 可读（须在已授权集合里），只给短时签名地址，不给 `/p/` |
+| `private` / 草稿 / 归档 / 回收站 | 不可读 | 不可读 |
+
+判定只有两个函数：[`deps.can_read_asset`](src/ctrlstore/public_api/deps.py)（单条）与
+`deps.visible_in_collection`（列表）。新增读取入口必须经过它们，否则迟早漏一格。
+
+集合本身能不能读由**归属**决定：库级集合（无 `site_id`）对所有调用方开放，
+属于某站点的集合只对那个站点开放。站点授权只决定内容可见性（`site` 与未列出），
+不参与集合可读性——两件事分开，语义才不打架。
+
+带令牌但令牌无效返回 401，不降级成匿名——否则「令牌用错」会显示成「内容不存在」。
+
+### 响应与缓存
+
+```json
+{
+  "slug": "home.hero",
+  "title": "首页主视觉",
+  "updated_at": "2026-10-20T08:00:00Z",
+  "items": [
+    {"position": 0, "caption": "秋季主图",
+     "asset": {"id": "…", "kind": "image", "title": "主视觉", "mime": "image/png",
+               "width": 2400, "height": 1350,
+               "urls": {"original": "http://…/p/…/original.png"}}}
+  ]
+}
+```
+
+* 只读发布快照：标题、摘要、标签、封面、别名、正文、正文图片都只在发布时更新。
+  编辑中的 `slug`、`asset_references` 与标题改了不影响线上。
+* `urls.original` 只在内容真的进了 `/p/` 时出现；「仅站点」内容给 `urls.signed`
+  （绑定内容 + 已发布版本 + 过期时间，撤回后自动失效）。私有内容两者都没有。
+* 缩略图/展示图要等对应派生文件 `ready` 才出现（第 7 部分）。
+* 地址用 `public_base_url` 拼绝对地址，换域名只改配置。
+* 匿名响应 `Cache-Control: public, max-age=60` 并带弱 `ETag`，`If-None-Match` 命中返回 304；
+  带站点令牌的响应 `private, no-store`。
+* 集合的 `updated_at` 与 `ETag` 只由本次**可见条目**的发布时间决定。
+
+### Markdown 渲染
+
+`content/markdown_render.py`：Markdown → HTML → `nh3` 消毒 → 只留能解析成功的图片。
+
+* 脚本、内联事件、`javascript:` 一律去掉；允许的标签与属性是白名单。
+* 文内图片只能来自本库：外站图片整张去掉；`asset:<id>`、`/p/<id>/…`、带域名的
+  `/p/<id>/…` 三种写法都收敛到同一个绝对地址。
+* 图片被撤回或未发布时，这张图从 HTML 里去掉，文章照常可读。
+  能被调用方读取的「仅站点」图片则换成短时签名地址——授权站点看到图，匿名看不到。
+* **只有图片受上面两条约束**。`[手册](/p/<id>/original.pdf)` 是下载链接，不要求目标
+  是已发布图片（否则链接一份手册都会被判成"引用了未发布图片"）；链接里的 `/p/`
+  地址同样补成绝对地址。
+* 代码块与行内代码里的 `![…](asset:…)` 是示例文字，不算引用。
+* front matter 不进正文——它已经映射到 JSON 的 `title` / `slug` / `summary` / `tags`。
+* `?format=markdown` 只对站点令牌开放，匿名只拿 HTML。
+
+引用规则分两层：「是不是图片」由 `assets/markdown.image_ids` 在解析阶段判定；
+「这张图此刻能不能读」由 `public_api.deps.can_read_asset` 在渲染时判定。
+
+### 纯文本的 HTML
+
+纯文本**不经过 Markdown**：先做 HTML 转义，再包进 `<pre>`，最后照常过 `nh3` 消毒。
+所以正文里的 ```、`#`、`[x](y)` 都是字面量，不会被当成语法；`<script>` 仍然被转义成文本。
+
+它和文章用同一套字段（`body.format` + `body.html`），网站不需要为公告写第二种渲染分支；
+需要原文时用 `?format=markdown` 取纯文本（字段名沿用既有约定，内容就是原文）。
+
 ## 数据库
 
 SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON`、`synchronous=NORMAL`、
@@ -422,9 +537,11 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 共三条连接，写锁竞争可预测。只有 API 和 worker 打开库文件，网站只走 HTTP。
 
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
-`0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本。
-「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」都由库层约束兜底，
-不只靠应用代码。时间一律按 UTC 存不带时区的值。
+`0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本，
+`0005` 集合与站点授权，`0006` 发布快照补别名与图片引用。
+「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」「同一集合内同一内容只出现一次、
+位置唯一」「已发布别名唯一」都由库层约束兜底，不只靠应用代码。
+时间一律按 UTC 存不带时区的值。
 
 迁移用 Alembic，`render_as_batch=True`（SQLite 改表必须批处理）。新增迁移：
 

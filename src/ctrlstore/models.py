@@ -321,6 +321,13 @@ class Asset(Base):
     __table_args__ = (
         Index("ix_assets_created", "created_at", "id"),
         Index("ix_assets_kind_status", "kind", "status"),
+        # 已发布的别名全局唯一：撤回会清空该列，所以部分索引即可。
+        Index(
+            "ux_assets_published_slug",
+            "published_slug",
+            unique=True,
+            sqlite_where=text("published_slug IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -329,7 +336,7 @@ class Asset(Base):
         ForeignKey("folders.id", ondelete="SET NULL"), index=True
     )
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
-    #: 只在已发布的文本内容中唯一（第 6 部分按别名取文本）。
+    #: 编辑中的别名。公开读取只看 ``published_slug``。
     slug: Mapped[str | None] = mapped_column(String(128), index=True)
 
     # —— 编辑中的字段 ——
@@ -355,6 +362,11 @@ class Asset(Base):
     published_cover_asset_id: Mapped[str | None] = mapped_column(String(36))
     #: 发布当时的标签名，JSON 数组文本。
     published_tags: Mapped[str | None] = mapped_column(Text)
+    #: 发布当时的别名。``/by-slug`` 只认这一个，编辑中的 ``slug`` 不对外生效。
+    published_slug: Mapped[str | None] = mapped_column(String(128))
+    #: 发布版本正文引用的图片 ID（JSON 数组）。渲染公开 HTML 时只认这一份，
+    #: 草稿里增删引用不会改变线上正文。
+    published_references: Mapped[str | None] = mapped_column(Text)
 
     #: 乐观锁：每次写入加 1，请求里的值不一致就 409。
     revision: Mapped[int] = mapped_column(Integer, default=1)
@@ -431,3 +443,78 @@ class AssetReference(Base):
     to_asset_id: Mapped[str] = mapped_column(
         ForeignKey("assets.id", ondelete="CASCADE"), index=True
     )
+
+
+class Collection(Base):
+    """有序的内容列表，网站按别名读取（企划第 10.2 节）。
+
+    ``site_id`` 为空表示库级集合，授权后多站可读；``allowed_kinds`` 为空表示不限制类型。
+    """
+
+    __tablename__ = "collections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    site_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), index=True
+    )
+    #: 全局唯一别名，例如 ``home.hero``。
+    slug: Mapped[str] = mapped_column(String(128), unique=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    #: 允许的类型，JSON 数组文本；空表示不限制。
+    allowed_kinds: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    items: Mapped[list[CollectionItem]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+        order_by="CollectionItem.position",
+        lazy="selectin",
+    )
+
+    @property
+    def kinds(self) -> list[str]:
+        return json.loads(self.allowed_kinds or "[]")
+
+    @kinds.setter
+    def kinds(self, values: list[str]) -> None:
+        self.allowed_kinds = json.dumps(sorted(set(values))) if values else None
+
+
+class CollectionItem(Base):
+    """集合里的一条。同一集合内同一内容只出现一次，位置唯一。"""
+
+    __tablename__ = "collection_items"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "asset_id", name="ux_collection_asset"),
+        UniqueConstraint("collection_id", "position", name="ux_collection_position"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), index=True
+    )
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    #: 覆盖该处的展示标题；为空就用内容自己的标题。
+    caption: Mapped[str] = mapped_column(String(255), default="")
+
+    collection: Mapped[Collection] = relationship(back_populates="items")
+    asset: Mapped[Asset] = relationship(lazy="joined")
+
+
+class SiteGrant(Base):
+    """站点能读哪些集合。前缀按点号分段匹配：``home`` 匹配 ``home.hero``，
+
+    不匹配 ``homepage``——这是企划第 10.5 节明确要求的边界。
+    """
+
+    __tablename__ = "site_grants"
+    __table_args__ = (UniqueConstraint("site_id", "prefix", name="ux_site_grant"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), index=True)
+    #: 集合别名前缀，例如 ``home`` 或 ``home.hero``。
+    prefix: Mapped[str] = mapped_column(String(128))
+    #: 是否允许在该前缀下的集合里看到「未列出」内容。
+    can_read_unlisted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

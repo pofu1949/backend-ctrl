@@ -136,8 +136,10 @@ def update_asset(
         actor=principal.user,
     )
     if payload.visibility is not None and asset.status == ASSET_PUBLISHED:
-        # 公开 ↔ 私有/仅站点 的切换要立刻反映到公开区。
-        # 按「已发布版本」增删链接：待发布的替换不影响线上那一版。
+        # 公开 ↔ 私有/仅站点 的切换要立刻反映到公开区，且顺序与发布一致：
+        # 先落库再动链接。反过来（先删链接后提交）一旦提交失败，链接已经没了，
+        # 状态却还是「已发布」，读的人会看到 404 而库里说在线。
+        db.commit()
         publish.sync_links(storage, asset)
     return _detail(asset)
 

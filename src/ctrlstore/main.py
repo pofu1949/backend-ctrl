@@ -23,7 +23,7 @@ from .db import create_engine, run_migrations
 from .errors import register_error_handlers
 from .health import check_health
 from .log import configure_logging
-from .public_api.files import router as public_router
+from .public_api import router as public_router
 
 logger = logging.getLogger(__name__)
 

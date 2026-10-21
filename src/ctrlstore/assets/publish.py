@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from .. import audit
@@ -30,12 +31,15 @@ from ..models import (
     VISIBILITY_PUBLIC,
     VISIBILITY_UNLISTED,
     Asset,
-    AssetReference,
     AssetVersion,
+    Collection,
+    CollectionItem,
     User,
     utcnow,
 )
 from ..storage import LocalStorage, keys
+from . import markdown
+from .service import clean_slug
 
 #: 会出现在 ``/p/`` 下的可见性。仅站点与私有都不进公开区。
 PUBLIC_VISIBILITIES = frozenset({VISIBILITY_PUBLIC, VISIBILITY_UNLISTED})
@@ -100,9 +104,10 @@ def publish(
         raise ApiError.conflict("回收站中的内容不能发布")
 
     version = _current_version(asset)
-    _ensure_references_published(db, asset)
-    if asset.status == ASSET_PUBLISHED and asset.published_version_id == version.id:
-        return asset  # 幂等：同一版本重复发布，不改 revision
+
+    references = _references_of_version(storage=storage, asset=asset, version=version)
+    _ensure_images_published(db, references)
+    _ensure_slug_available(db, asset)
 
     snapshot = {
         "published_version_id": version.id,
@@ -110,7 +115,13 @@ def publish(
         "published_summary": asset.summary,
         "published_cover_asset_id": asset.cover_asset_id,
         "published_tags": _tag_snapshot(asset),
+        "published_slug": clean_slug(asset.slug),
+        "published_references": json.dumps(sorted(references)),
     }
+    # 幂等按**整份快照**判断，不只看版本号：只改了标题或别名时再发布，线上必须跟着变。
+    if asset.status == ASSET_PUBLISHED and _snapshot_matches(asset, snapshot):
+        return asset
+
     for name, value in snapshot.items():
         setattr(asset, name, value)
     asset.status = ASSET_PUBLISHED
@@ -123,11 +134,19 @@ def publish(
         action=audit.ASSET_PUBLISHED,
         target_type=audit.TARGET_ASSET,
         target_id=asset.id,
-        detail={"version_no": version.version_no, "visibility": asset.visibility},
+        detail={
+            "version_no": version.version_no,
+            "visibility": asset.visibility,
+            "slug": asset.published_slug,
+        },
     )
 
     # 先提交状态再动文件：链接失败只会让公开地址 404，不会泄露未发布内容。
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ApiError.conflict(f"别名已被另一条已发布内容占用：{asset.slug}") from exc
     try:
         sync_links(storage, asset)
     except (ApiError, OSError) as exc:
@@ -220,14 +239,37 @@ def restore(
 
 
 def purge(db: DbSession, *, storage: LocalStorage, asset: Asset, actor: User) -> None:
-    """彻底删除（仅所有者）。必须已在回收站，且没有被其他内容当封面引用。"""
+    """彻底删除（仅所有者）。
+
+    必须已在回收站，且**没有被任何地方引用**：别的内容拿它当封面、或某个集合里还有它，
+    都会拒绝并列出引用，让操作者先去解除（企划第 10.5 节）。
+    """
     if asset.status != ASSET_TRASHED:
         raise ApiError.conflict("只有回收站中的内容可以彻底删除")
-    referrers = db.scalars(
-        select(Asset.id).where(Asset.cover_asset_id == asset.id, Asset.id != asset.id)
-    ).all()
-    if referrers:
-        raise ApiError.conflict("仍有内容把它当封面，先解除引用：" + ", ".join(sorted(referrers)))
+
+    covers = sorted(
+        db.scalars(
+            select(Asset.id).where(
+                # 编辑中与已发布的封面都要算：任一仍指向它就不能删。
+                (Asset.cover_asset_id == asset.id) | (Asset.published_cover_asset_id == asset.id),
+                Asset.id != asset.id,
+            )
+        ).all()
+    )
+    collections = sorted(
+        db.scalars(
+            select(Collection.slug)
+            .join(CollectionItem, CollectionItem.collection_id == Collection.id)
+            .where(CollectionItem.asset_id == asset.id)
+        ).all()
+    )
+    if covers or collections:
+        reasons = []
+        if covers:
+            reasons.append("仍有内容把它当封面：" + ", ".join(covers))
+        if collections:
+            reasons.append("仍属于这些集合：" + ", ".join(collections))
+        raise ApiError.conflict("先解除引用再删除（" + "；".join(reasons) + "）")
 
     for version in list(asset.versions):
         storage.discard_original(version.storage_key)
@@ -271,6 +313,11 @@ def sync_links(storage: LocalStorage, asset: Asset) -> bool:
 # —— 内部 ——
 
 
+def _snapshot_matches(asset: Asset, snapshot: dict[str, object]) -> bool:
+    """现有发布快照与将要写入的是否完全一致。"""
+    return all(getattr(asset, name) == value for name, value in snapshot.items())
+
+
 def _ensure_revision(asset: Asset, revision: int) -> None:
     if asset.revision != revision:
         raise ApiError.conflict(f"内容已被修改（当前修订号 {asset.revision}），请重新读取后再提交")
@@ -284,21 +331,55 @@ def _current_version(asset: Asset) -> AssetVersion:
     raise ApiError.conflict("内容还没有可发布的版本")
 
 
-def _ensure_references_published(db: DbSession, asset: Asset) -> None:
-    """正文引用的图片必须先发布（企划第 8.4 节 T4）。"""
-    targets = db.scalars(
-        select(AssetReference.to_asset_id).where(AssetReference.from_asset_id == asset.id)
-    ).all()
-    if not targets:
+def _references_of_version(
+    *, storage: LocalStorage, asset: Asset, version: AssetVersion
+) -> list[str]:
+    """要发布的那一版正文里引用的**图片** ID。
+
+    从**该版本的文件**解析，不用 ``asset_references``——那张表跟着草稿走，
+    发布时必须按将要上线的内容来判定。只认图片语法：指向文档的下载链接
+    （``[手册](/p/<id>/original.pdf)``）不在其中，不会被误判成未发布图片。
+    """
+    if asset.kind != "markdown":
+        return []
+    path = storage.original_path(version.storage_key)
+    if not path.is_file():
+        raise ApiError.conflict("要发布的版本文件不存在")
+    return markdown.image_ids(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _ensure_images_published(db: DbSession, asset_ids: list[str]) -> None:
+    """正文里的图片引用必须能显示：目标存在、是图片、且已发布（企划第 8.4 节 T4）。
+
+    链接（``[手册](/p/<id>/original.txt)``）不在这里，它们不受这条规则约束。
+    两种失败分开报，作者才知道该改哪：
+    * 目标不是图片或不存在——写法错了；
+    * 目标是图片但还没发布——先发布图片。
+    """
+    if not asset_ids:
         return
-    published = set(
-        db.scalars(
-            select(Asset.id).where(Asset.id.in_(targets), Asset.status == ASSET_PUBLISHED)
-        ).all()
-    )
-    missing = sorted(set(targets) - published)
+    rows = db.execute(
+        select(Asset.id, Asset.kind, Asset.status).where(Asset.id.in_(asset_ids))
+    ).all()
+    usable = {row.id for row in rows if row.kind == "image"}
+    published = {row.id for row in rows if row.kind == "image" and row.status == ASSET_PUBLISHED}
+
+    not_image = sorted(set(asset_ids) - usable)
+    if not_image:
+        raise ApiError.conflict("引用的不是图片：" + ", ".join(not_image))
+    missing = sorted(usable - published)
     if missing:
         raise ApiError.conflict("引用的图片尚未发布：" + ", ".join(missing))
+
+
+def _ensure_slug_available(db: DbSession, asset: Asset) -> None:
+    """别名在已发布内容中唯一。库层还有一条部分唯一索引兜底。"""
+    slug = clean_slug(asset.slug)
+    if slug is None:
+        return
+    taken = db.scalar(select(Asset.id).where(Asset.published_slug == slug, Asset.id != asset.id))
+    if taken is not None:
+        raise ApiError.conflict(f"别名已被另一条已发布内容占用：{slug}")
 
 
 def _reset_snapshot(asset: Asset) -> None:
@@ -312,6 +393,8 @@ def _reset_snapshot(asset: Asset) -> None:
     asset.published_summary = None
     asset.published_cover_asset_id = None
     asset.published_tags = None
+    asset.published_slug = None
+    asset.published_references = None
     asset.published_at = None
 
 
@@ -323,8 +406,3 @@ def _extension_of(storage_key: str) -> str:
     """从存储键取扩展名。键的形状由 ``storage.keys`` 保证。"""
     keys.validate(storage_key)
     return storage_key.rsplit(".", 1)[-1]
-
-
-def is_publicly_visible(asset: Asset) -> bool:
-    """公开读取的唯一判据：已发布且可见性允许。"""
-    return asset.status == ASSET_PUBLISHED and asset.visibility in PUBLIC_VISIBILITIES

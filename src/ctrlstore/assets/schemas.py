@@ -60,8 +60,10 @@ class AssetOut(BaseModel):
     cover_asset_id: str | None = None
     revision: int
     current_version: VersionOut | None = None
-    #: 线上版本 id。第 4 部分恒为空，发布之后才有值。
+    #: 线上版本 id。发布之后才有值。
     published_version_id: str | None = None
+    #: 线上别名。编辑中的 ``slug`` 改了也要发布才生效。
+    published_slug: str | None = None
     tags: list[TagRefOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -84,6 +86,7 @@ class AssetOut(BaseModel):
             revision=asset.revision,
             current_version=VersionOut.of(current) if current else None,
             published_version_id=asset.published_version_id,
+            published_slug=asset.published_slug,
             tags=[TagRefOut.model_validate(tag) for tag in asset.tags],
             created_at=asset.created_at,
             updated_at=asset.updated_at,

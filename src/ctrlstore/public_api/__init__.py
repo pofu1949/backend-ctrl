@@ -1,5 +1,18 @@
-"""公开接口 ``/api/public/v1``。
+"""公开接口 ``/api/public/v1``（企划第 12 章）。
 
-第 5 部分只放短时签名下载：签名由 API 校验，通过后交给 Nginx 内部跳转
-（开发环境直接发送）。集合、文章、表格预览等读取接口在第 6 部分加入。
+网站只消费这里与 ``/p/``，不读磁盘、不打开数据库。调用方要么匿名，
+要么带站点令牌；差别只在「能看哪些可见性」，判定全在 ``deps.can_read_asset``。
 """
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from .assets import router as assets_router
+from .collections import router as collections_router
+from .files import router as files_router
+
+router = APIRouter()
+router.include_router(collections_router)
+router.include_router(assets_router)
+router.include_router(files_router)

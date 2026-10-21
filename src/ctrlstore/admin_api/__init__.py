@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ..assets.router import router as assets_router
+from ..collections.router import router as collections_router
 from ..folders.router import router as folders_router
 from ..tags.router import router as tags_router
 from ..uploads.router import router as uploads_router
@@ -22,3 +23,4 @@ router.include_router(uploads_router)
 router.include_router(folders_router)
 router.include_router(tags_router)
 router.include_router(assets_router)
+router.include_router(collections_router)
