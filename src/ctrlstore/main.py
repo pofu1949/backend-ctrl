@@ -24,6 +24,7 @@ from .errors import register_error_handlers
 from .health import check_health
 from .log import configure_logging
 from .public_api import router as public_router
+from .stats.throttle import PageviewThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 每个请求一个 Session；连接仍只有一条，由引擎的 pool_size=1 保证。
     app.state.session_factory = sessionmaker(bind=app.state.engine, expire_on_commit=False)
     app.state.login_throttle = LoginThrottle()
+    app.state.pageview_throttle = PageviewThrottle(
+        max_per_window=settings.pageview_rate_per_minute
+    )
 
     register_error_handlers(app)
     app.include_router(admin_router, prefix=ADMIN_PREFIX)

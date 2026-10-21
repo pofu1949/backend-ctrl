@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     thumb_max_side: int = 480
     display_max_side: int = 1600
 
+    # —— 访问上报（第 8 部分）——
+    #: 每个站点令牌每分钟最多接受多少条上报。网站的转发请求远低于这个量。
+    pageview_rate_per_minute: int = 600
+
     # —— 会话与 Cookie ——
     #: 绝对有效期（小时），从登录算起。
     session_absolute_hours: int = 12
@@ -179,6 +183,7 @@ class Settings(BaseSettings):
         "trash_retention_days",
         "thumb_max_side",
         "display_max_side",
+        "pageview_rate_per_minute",
     )
     @classmethod
     def _positive_int(cls, value: int) -> int:

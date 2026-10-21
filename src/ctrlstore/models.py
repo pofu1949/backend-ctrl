@@ -622,3 +622,71 @@ class SiteGrant(Base):
     #: 是否允许在该前缀下的集合里看到「未列出」内容。
     can_read_unlisted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# —— 访问统计（企划第 10.4 节）——
+#: 明细表保留天数。日汇总长期保留，删明细不影响已经写好的每日人数。
+PAGEVIEW_DETAIL_RETENTION_DAYS = 400
+
+#: 一天内最多保留多少条不同路径，其余并入这一行。
+PAGEVIEW_OTHER_PATH = "其他"
+MAX_PAGEVIEW_PATHS = 500
+
+
+class PageviewDaily(Base):
+    """按站点、按上海自然日的汇总。主键去重，长期保留。"""
+
+    __tablename__ = "pageview_daily"
+    __table_args__ = (Index("ix_pageview_daily_day", "day"),)
+
+    site_id: Mapped[str] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: ``Asia/Shanghai`` 的日期，``YYYY-MM-DD``。查询按字符串比较即可。
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    uv: Mapped[int] = mapped_column(Integer, default=0)
+    pv: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PageviewEvent(Base):
+    """事件去重：同一站点 24 小时内同一 ``event_id`` 只计一次。
+
+    网站重试或浏览器重复发送时，次数不会翻倍。只保留 24 小时，过期由 worker 清掉。
+    """
+
+    __tablename__ = "pageview_events"
+    __table_args__ = (Index("ix_pageview_events_received", "received_at"),)
+
+    site_id: Mapped[str] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PageviewVisitor(Base):
+    """当日已经计过人数的人。只存 HMAC，不存原始访客标识。"""
+
+    __tablename__ = "pageview_visitors"
+    __table_args__ = (Index("ix_pageview_visitors_day", "day"),)
+
+    site_id: Mapped[str] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    #: HMAC-SHA256 的十六进制。
+    visitor_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class PageviewPath(Base):
+    """按路径的次数。不含查询串，超过上限的路径并入「其他」。"""
+
+    __tablename__ = "pageview_paths"
+    __table_args__ = (Index("ix_pageview_paths_day", "day"),)
+
+    site_id: Mapped[str] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    path: Mapped[str] = mapped_column(String(512), primary_key=True)
+    pv: Mapped[int] = mapped_column(Integer, default=0)

@@ -202,6 +202,9 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | GET | `/api/public/v1/by-slug/{slug}` | 公开；按别名取文章或文本 |
 | GET | `/api/public/v1/assets/{id}/table` | 公开；表格预览（形状已定，第 9 部分填充） |
 | GET | `/api/public/v1/files/{id}` | 匿名；凭签名读取，撤回后 404 |
+| POST | `/api/public/v1/pageviews` | 站点令牌；页面访问上报，重复事件不重复计数 |
+| GET | `/api/admin/v1/dashboard` | 所有者；今日、月份、近 12 个月与库存 |
+| GET | `/api/admin/v1/dashboard/day` | 所有者；某日的次数与最多 10 条路径 |
 
 替换文件没有单独接口：`POST /uploads` 或 `/uploads/direct` 带 `asset_id`，完成后追加为新版本。
 新建与替换共用一条上传路径，避免两套登记规则。
@@ -586,7 +589,8 @@ POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": fa
   `video_version_retention`）。两个指针占用的版本不计入上限。淘汰版本时它的派生目录一起删。
 * 回收站默认保留 30 天（`trash_retention_days`），到期由 `maintenance.cleanup` 彻底删除；
   仍被封面或集合引用时跳过，等所有者先解除引用。
-* 超过 24 小时未完成的上传会话、过旧的已完成任务记录也在同一个任务里清理。
+* 超过 24 小时未完成的上传会话、过旧的已完成任务记录、400 天前的访问明细也在同一个
+  任务里清理（日汇总不动）。
 
 ### 验收
 
@@ -606,6 +610,76 @@ ctrlstore worker --once
 curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 多了 thumb
 ```
 
+## 访问统计与主面板
+
+### 口径
+
+* 日历按 `Asia/Shanghai`，一天从当地 00:00 到次日 00:00；库内时间仍是 UTC。
+* **独立访客**：同一个访客标识在一个自然日内计 1 人。标识是网站发给浏览器的随机号，
+  不是账号，也不是 IP。
+* **浏览次数**：一次真实的页面打开计 1 次。同一人当天看三页，人数是 1、次数是 3。
+* **近 12 个月**是「每日独立访客按月相加」，不是整月去重后的人数。
+* **未上报与上报后当天为 0 分开显示**：前者 `reported=false`，给出「尚未收到网站上报」，
+  数字留空；后者是真实的 0。
+
+### 上报
+
+`POST /api/public/v1/pageviews`，**只接受站点令牌**。访客浏览器不持有令牌：事件由
+网站服务器转发，正文是 `event_id`、`visitor_id`、`path`，可选 `user_agent`。
+
+| 情况 | 结果 |
+| --- | --- |
+| 正常页面打开 | `counted: true` |
+| 同一 `event_id` 在 24 小时内重试 | `counted: false`，`reason: duplicate` |
+| 预取 / 预渲染（`Sec-Purpose`、`Purpose`、`X-Purpose`、`X-Moz`） | `prefetch` |
+| 爬虫、社交预览、合成监控的 UA | `bot` |
+| `/api`、`/p`、`/admin`、`/healthz`、`/_internal`、带查询串或片段的路径 | `ignored_path` |
+| 路径不以 `/` 开头、含 `..`、绝对外链或超过 512 字符 | 422 `invalid` |
+
+响应固定为 `{"counted": true|false, "reason": …}`，带 `Cache-Control: no-store`。网站仍按
+「统计失败不影响页面」处理：超时后最多重试两次，不阻塞渲染。
+
+没有补报入口：日期只取服务器**收到请求**的时间，请求里带 `date` 之类的字段会被忽略。
+
+限速按站点、每分钟 `pageview_rate_per_minute`（默认 600）计；与登录限速一样计数放在
+进程内存，两个 API 进程各自计数。额度远高于正常转发量，只用来挡刷量。
+
+### 存了什么
+
+* `pageview_daily`：站点 + 上海日期的人数与次数，长期保留，是日历的历史。
+* `pageview_events`：24 小时内的 `event_id`，用来去重。
+* `pageview_visitors`：当日已计过人数的 HMAC；**原始标识、IP、查询串都不入库**。
+* `pageview_paths`：按路径的次数；一天超过 500 条不同路径时，其余并入「其他」。
+
+三张明细表保留 400 天（含今天），由 worker 的 `maintenance.cleanup` 删除；删明细不改
+已经写好的日汇总。访客 HMAC 用 `pageview_hmac_secret`，**不要在某一天中途更换密钥**，
+否则同一天的人会被算成两批。访问上报量大且含访客行为，因此不进审计日志。
+
+统计口径需要时区数据：仓库的依赖里有 `tzdata`（Debian 13 自带系统时区，
+Windows 开发与测试靠这个包）。
+
+### 主面板
+
+`GET /api/admin/v1/dashboard?month=YYYY-MM`，**仅所有者**：
+
+* `today`：今日人数、次数，以及与昨日的差（`uv_delta`、`pv_delta`）；
+* `month.days`：整月每日人数与次数，没有记录的日子为 0；
+* `months`：近 12 个月（含本月）的「每日独立访客按月相加」；
+* `inventory`：七类内容的条数、已发布条数、当前版本字节、含历史版本字节；页脚是
+  全库条数、总占用、回收站条数与磁盘剩余。
+
+没有上报记录时返回 `reported: false` 与 `message`，`today` 为 `null`、`month.days` 与
+`months` 为空；库存不依赖上报，照常计算。
+
+`GET /api/admin/v1/dashboard/day?date=YYYY-MM-DD` 返回当天的人数、次数与最多 10 条路径，
+供日历点开某一天时用。编辑访问这两个接口返回 403。
+
+### 网站侧接入
+
+浏览器在首次打开和客户端路由切换时把事件发给 Next.js 自己的接口，再由网站服务器带
+站点令牌转发；站点令牌只放在网站服务器的环境变量里。预取、`/api` 与 `/p` 请求不上报。
+网站侧的访客标识可以放在自己的 Cookie 里（例如 `cs_vid`），CtrlStore 只收到它的 HMAC。
+
 ## 数据库
 
 SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON`、`synchronous=NORMAL`、
@@ -617,7 +691,8 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
 `0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本，
-`0005` 集合与站点授权，`0006` 发布快照补别名与图片引用，`0007` 后台任务、派生文件与定时发布。
+`0005` 集合与站点授权，`0006` 发布快照补别名与图片引用，`0007` 后台任务、派生文件与定时发布，
+`0008` 访问统计（日汇总、事件、访客与路径）。
 「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」「同一集合内同一内容只出现一次、
 位置唯一」「已发布别名唯一」都由库层约束兜底，不只靠应用代码。
 时间一律按 UTC 存不带时区的值。

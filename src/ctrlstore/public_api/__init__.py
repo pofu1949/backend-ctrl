@@ -11,8 +11,10 @@ from fastapi import APIRouter
 from .assets import router as assets_router
 from .collections import router as collections_router
 from .files import router as files_router
+from .pageviews import router as pageviews_router
 
 router = APIRouter()
 router.include_router(collections_router)
 router.include_router(assets_router)
 router.include_router(files_router)
+router.include_router(pageviews_router)

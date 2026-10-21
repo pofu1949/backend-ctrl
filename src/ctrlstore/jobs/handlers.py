@@ -37,6 +37,7 @@ from ..models import (
     Derivative,
     utcnow,
 )
+from ..stats import pageviews
 from ..storage import LocalStorage
 from ..uploads import service as uploads
 from . import service as jobs
@@ -105,12 +106,14 @@ def _publish_due(*, settings: Settings, storage: LocalStorage, db: DbSession, pa
 
 
 def _cleanup(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
-    """每小时一次：过期上传、回收站到期、旧任务记录。
+    """每小时一次：过期上传、回收站到期、访问明细、旧任务记录。
 
     清理只删「按已提交状态可以删」的东西：回收站内容仍被封面或集合引用时跳过，
-    等所有者先解除引用，不在这里替人做决定。
+    等所有者先解除引用，不在这里替人做决定。访问明细超过 400 天就删，
+    日汇总不动。
     """
     uploads.expire_stale(db, storage=storage)
+    pageviews.purge_old(db)
     db.commit()
 
     _purge_expired_trash(settings=settings, storage=storage, db=db)

@@ -58,6 +58,10 @@ trash_retention_days = 30
 thumb_max_side = 480
 display_max_side = 1600
 
+# —— 访问上报（第 8 部分）——
+# 每个站点令牌每分钟最多接受多少条页面访问上报。网站转发量远低于这个数。
+pageview_rate_per_minute = 600
+
 # —— 进程 ——
 log_level = "INFO"
 api_host = "127.0.0.1"
