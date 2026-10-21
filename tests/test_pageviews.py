@@ -23,6 +23,7 @@ from ctrlstore.models import (
     PAGEVIEW_OTHER_PATH,
     PageviewDaily,
     PageviewEvent,
+    PageviewMergedPath,
     PageviewPath,
     PageviewVisitor,
 )
@@ -319,6 +320,55 @@ def test_paths_overflow_into_other(db: DbSession) -> None:
     assert len(rows) <= MAX_PAGEVIEW_PATHS
     assert dict(rows)[PAGEVIEW_OTHER_PATH] >= 5
     assert sum(count for _, count in rows) == MAX_PAGEVIEW_PATHS + 5
+
+
+def test_merged_path_can_become_independent_again(db: DbSession) -> None:
+    """被并入「其他」的路径再次出现时，恢复成独立一行并带回历史次数。"""
+    site = _new_site(db)
+    day = pageviews.local_day()
+    moment = datetime.now(UTC)
+    for index in range(MAX_PAGEVIEW_PATHS + 5):
+        pageviews.record(
+            db,
+            site_id=site.id,
+            secret=SECRET,
+            event_id=f"e{index}",
+            visitor_id=f"v{index}",
+            path=f"/page/{index}",
+            now=moment,
+        )
+    db.commit()
+
+    merged = db.scalar(
+        select(PageviewMergedPath).where(
+            PageviewMergedPath.day == day, PageviewMergedPath.site_id == site.id
+        )
+    )
+    assert merged is not None
+    path, previous = merged.path, merged.pv
+
+    pageviews.record(
+        db,
+        site_id=site.id,
+        secret=SECRET,
+        event_id="back",
+        visitor_id="back",
+        path=path,
+        now=moment,
+    )
+    db.commit()
+
+    db.expire_all()
+    row = db.scalar(
+        select(PageviewPath).where(PageviewPath.day == day, PageviewPath.path == path)
+    )
+    assert row is not None
+    assert row.pv == previous + 1
+    assert db.scalar(
+        select(PageviewMergedPath).where(
+            PageviewMergedPath.day == day, PageviewMergedPath.path == path
+        )
+    ) is None
 
 
 # —— 限速 ——

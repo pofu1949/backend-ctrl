@@ -9,7 +9,7 @@
 | 类型 | 做什么 |
 | --- | --- |
 | ``image.thumb`` | 生成 480 像素 WebP 缩略图，就绪后按发布状态补进公开区 |
-| ``image.display`` | 1600 像素展示图，代码同上一行，默认不入队（企划第 8.5 节 D2） |
+| ``image.display`` | 1600 像素展示图，代码同上一行 |
 | ``content.extract`` | 文档/文本抽取、xlsx 预览、PDF 首页图 |
 | ``video.inspect`` | ffprobe 判断能否播放，ffmpeg 截封面 |
 | ``publish.due`` | 把到点的定时发布送出去 |
@@ -35,6 +35,7 @@ from ..content import extract as content_extract
 from ..content import pdf_text, video
 from ..content.limits import ExtractionFailed, ExtractionSkipped
 from ..errors import ApiError
+from ..health import has_available_memory
 from ..imaging import render_webp
 from ..models import (
     ASSET_TRASHED,
@@ -67,6 +68,19 @@ class JobError(RuntimeError):
     """任务无法完成。消息会写进 ``jobs.last_error``，供 ``ctrlstore jobs list`` 查看。"""
 
 
+class JobDeferred(Exception):
+    """资源暂时不足，任务不开始执行。退回 pending，不消耗尝试次数。"""
+
+
+def _ensure_memory(settings: Settings) -> None:
+    """解码类任务开始前查一次可用内存（企划第 17.2 节）。
+
+    上传在 API 侧也会拒绝；这里挡住已经在队列里、但内存变低时才轮到的任务。
+    """
+    if not has_available_memory(settings):
+        raise JobDeferred("可用内存不足，稍后再试")
+
+
 def run(*, settings: Settings, storage: LocalStorage, db: DbSession, job) -> None:
     """执行一个任务。未知类型直接失败，不静默略过。"""
     handler = _HANDLERS.get(job.kind)
@@ -80,6 +94,7 @@ def run(*, settings: Settings, storage: LocalStorage, db: DbSession, job) -> Non
 
 def _image_derivative(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """生成一份图片派生文件，成功后就绪并尝试补进公开区。"""
+    _ensure_memory(settings)
     derivative = db.get(Derivative, str(payload.get("derivative_id", "")))
     if derivative is None:
         # 版本已被保留规则淘汰，任务自然作废；这不是错误。
@@ -117,6 +132,7 @@ def _image_derivative(*, settings: Settings, storage: LocalStorage, db: DbSessio
 
 def _content_extract(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """抽取一个版本的文本；xlsx 另存预览 JSON，PDF 另存首页图。"""
+    _ensure_memory(settings)
     version = _version(db, payload)
     if version is None:
         return
@@ -207,6 +223,7 @@ def _store_preview(
 
 def _video_inspect(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """探测编码并尝试截封面。没有 ffprobe/ffmpeg 就跳过，不影响播放原片。"""
+    _ensure_memory(settings)
     version = _version(db, payload)
     if version is None:
         return

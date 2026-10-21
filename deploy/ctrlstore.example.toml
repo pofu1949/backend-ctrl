@@ -54,7 +54,7 @@ version_retention = 5
 video_version_retention = 2
 # 回收站保留天数。到期由 worker 彻底删除；仍被封面或集合引用时会跳过。
 trash_retention_days = 30
-# 缩略图最长边。展示图（1600）属于后续增强，第 7 部分只留任务类型。
+# 缩略图与展示图的最长边。展示图不替代原图，只用于中等尺寸场景。
 thumb_max_side = 480
 display_max_side = 1600
 
@@ -66,6 +66,9 @@ pageview_rate_per_minute = 600
 # 0 表示不限。计入未彻底删除的所有版本与派生文件，含回收站；硬链接不重复计。
 user_quota_bytes = 0        # 单个账号，例如 42949672960（40 GB）
 library_quota_bytes = 0     # 全库，例如 214748364800（200 GB）
+# 条数配额：一条内容不论多少版本都算 1；含回收站。
+user_quota_items = 0        # 单个账号，例如 5000
+library_quota_items = 0     # 全库，例如 20000
 
 # —— 运维（第 9 部分）——
 # 备份脚本默认写到 /var/backups/ctrlstore；所有者健康接口读这里最新的成功清单。

@@ -22,7 +22,7 @@ from .. import audit, idempotency, quota
 from ..assets import service as assets
 from ..config import Settings
 from ..errors import ApiError
-from ..health import disk_usage
+from ..health import disk_usage, has_available_memory
 from ..models import (
     UPLOAD_CREATED,
     UPLOAD_EXPIRED,
@@ -85,12 +85,15 @@ def create_session(
     quota.ensure_capacity(
         db,
         settings=settings,
-        owner_id=actor.id,
+        owner_id=_content_owner_id(db, target_asset_id=target_asset_id, fallback=actor.id),
         extra_bytes=settings.limits.for_kind(kind),
     )
     _ensure_slot_available(db, actor)
     if target_asset_id:
         _ensure_target_replaceable(db, target_asset_id, kind=kind)
+    else:
+        # 替换不增加条数；新建内容才查条数配额。
+        quota.ensure_item_capacity(db, settings=settings, owner_id=actor.id)
 
     session = UploadSession(
         actor_id=actor.id,
@@ -204,7 +207,12 @@ def complete(
         _ensure_capacity(settings)
         # 合并后再按真实字节数检查一次：开会话时用的是上限预估。
         quota.ensure_capacity(
-            db, settings=settings, owner_id=session.actor_id, extra_bytes=result.byte_size
+            db,
+            settings=settings,
+            owner_id=_content_owner_id(
+                db, target_asset_id=session.asset_id, fallback=session.actor_id
+            ),
+            extra_bytes=result.byte_size,
         )
 
         # 登记与落盘一起完成：新内容或该内容的新版本，规则都在 assets.service。
@@ -379,14 +387,18 @@ def _file_chunks(path: Path) -> Iterable[bytes]:
 
 
 def duplicate_of(db: DbSession, session: UploadSession) -> str | None:
-    """同字节的最近一次已完成上传。完整的内容级查重在登记之后（第 4 部分）。"""
+    """同字节的最近一次已完成上传所对应的**内容 ID**。
+
+    编辑要决定的是「是否改引用」，引用的是内容而不是某次上传会话。
+    """
     if not session.sha256:
         return None
     return db.scalar(
-        select(UploadSession.id)
+        select(UploadSession.asset_id)
         .where(
             UploadSession.sha256 == session.sha256,
             UploadSession.status == UPLOAD_READY,
+            UploadSession.asset_id.is_not(None),
             UploadSession.id != session.id,
         )
         .order_by(UploadSession.completed_at.desc())
@@ -404,6 +416,19 @@ def _kind_or_invalid(filename: str) -> tuple[str, str]:
         raise ApiError.invalid(str(exc)) from exc
 
 
+def _content_owner_id(db: DbSession, *, target_asset_id: str | None, fallback: str) -> str:
+    """配额的计账主体是内容所有者，不是本次操作者。
+
+    新建内容时二者相同；编辑替换他人内容时，新版本的字节记在原所有者名下（企划第 11.4 节）。
+    """
+    if not target_asset_id:
+        return fallback
+    from ..models import Asset
+
+    asset = db.get(Asset, target_asset_id)
+    return asset.owner_id if asset is not None else fallback
+
+
 def _trim_filename(filename: str) -> str:
     """只保留末段名字：原始文件名用于下载头，不该带路径。"""
     name = filename.replace("\\", "/").split("/")[-1].strip()
@@ -413,7 +438,12 @@ def _trim_filename(filename: str) -> str:
 
 
 def _ensure_capacity(settings: Settings) -> None:
-    """磁盘阈值：剩余低于 10 GB 或低于总容量 5% 就拒绝新上传（企划第 11.4 节）。"""
+    """磁盘与内存阈值：任一不足都拒绝新上传（企划第 11.4、17.2 节）。
+
+    已发布文件的读取与撤回不受这里的限制；只挡新工作。
+    """
+    if not has_available_memory(settings):
+        raise ApiError.insufficient_storage("可用内存不足，暂不接受新上传")
     usage = disk_usage(settings.data_dir)
     if usage is None:
         raise ApiError.insufficient_storage("无法确认磁盘剩余空间")

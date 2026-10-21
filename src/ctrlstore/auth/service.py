@@ -181,7 +181,13 @@ def create_site(db: DbSession, *, key: str, name: str, actor: User | None = None
 
 
 def issue_site_token(
-    db: DbSession, *, site: Site, name: str, expires_at: datetime | None, actor: User | None
+    db: DbSession,
+    *,
+    site: Site,
+    name: str,
+    expires_at: datetime | None,
+    actor: User | None,
+    allowed_ip: str | None = None,
 ) -> tuple[str, ApiToken]:
     """为站点签发只读令牌。明文只在返回值里出现一次。"""
     plaintext, token = tokens.create(
@@ -190,6 +196,7 @@ def issue_site_token(
         subject_type="site",
         subject_id=site.id,
         expires_at=expires_at,
+        allowed_ip=allowed_ip,
     )
     audit.record(
         db,
@@ -198,13 +205,24 @@ def issue_site_token(
         actor_id=actor.id if actor else "",
         target_type=audit.TARGET_TOKEN,
         target_id=token.id,
-        detail={"subject_type": "site", "subject": site.key, "name": token.name},
+        detail={
+            "subject_type": "site",
+            "subject": site.key,
+            "name": token.name,
+            "allowed_ip": token.allowed_ip,
+        },
     )
     return plaintext, token
 
 
 def issue_user_token(
-    db: DbSession, *, user: User, name: str, expires_at: datetime | None, actor: User | None
+    db: DbSession,
+    *,
+    user: User,
+    name: str,
+    expires_at: datetime | None,
+    actor: User | None,
+    allowed_ip: str | None = None,
 ) -> tuple[str, ApiToken]:
     """为用户签发命令行令牌。"""
     plaintext, token = tokens.create(
@@ -213,6 +231,7 @@ def issue_user_token(
         subject_type=SUBJECT_USER,
         subject_id=user.id,
         expires_at=expires_at,
+        allowed_ip=allowed_ip,
     )
     audit.record(
         db,
@@ -221,7 +240,12 @@ def issue_user_token(
         actor_id=actor.id if actor else "",
         target_type=audit.TARGET_TOKEN,
         target_id=token.id,
-        detail={"subject_type": "user", "subject": user.username, "name": token.name},
+        detail={
+            "subject_type": "user",
+            "subject": user.username,
+            "name": token.name,
+            "allowed_ip": token.allowed_ip,
+        },
     )
     return plaintext, token
 

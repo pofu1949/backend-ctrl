@@ -18,6 +18,7 @@ from ..models import (
     DERIVATIVE_PENDING,
     DERIVATIVE_READY,
     PUBLIC_DERIVATIVE_PURPOSES,
+    PURPOSE_DISPLAY,
     PURPOSE_TABLE_PREVIEW,
     PURPOSE_THUMB,
     Asset,
@@ -55,23 +56,32 @@ def public_ready(version: AssetVersion) -> list[Derivative]:
     return [item for item in ready(version) if item.purpose in PUBLIC_DERIVATIVE_PURPOSES]
 
 
-def schedule_thumbnail(db: DbSession, *, asset: Asset, version: AssetVersion) -> Derivative:
-    """登记缩略图并入队。只有图片版本会调用这里。
+def schedule_image_derivatives(
+    db: DbSession, *, asset: Asset, version: AssetVersion
+) -> list[Derivative]:
+    """登记缩略图与展示图并入队。只有图片版本会调用这里。
 
-    同版本重复调用不会排第二个任务；已经 ``ready`` 的直接返回，不重做。
+    同版本重复调用不会排第二个任务；已经 ``ready`` 的那一项直接跳过。
+    展示图（最长边 1600）属于第一期的可选项，不阻塞发布（企划第 8.5 节 D2）。
     """
-    derivative = ensure(
-        db,
-        asset=asset,
-        version=version,
-        purpose=PURPOSE_THUMB,
-        mime=MIME_BY_PURPOSE[PURPOSE_THUMB],
-    )
-    if derivative.status != DERIVATIVE_READY:
-        derivative.status = DERIVATIVE_PENDING
-        derivative.updated_at = utcnow()
-        jobs.enqueue(db, jobs.KIND_THUMB, {"derivative_id": derivative.id})
-    return derivative
+    scheduled: list[Derivative] = []
+    for purpose, kind in (
+        (PURPOSE_THUMB, jobs.KIND_THUMB),
+        (PURPOSE_DISPLAY, jobs.KIND_DISPLAY),
+    ):
+        derivative = ensure(
+            db,
+            asset=asset,
+            version=version,
+            purpose=purpose,
+            mime=MIME_BY_PURPOSE[purpose],
+        )
+        if derivative.status != DERIVATIVE_READY:
+            derivative.status = DERIVATIVE_PENDING
+            derivative.updated_at = utcnow()
+            jobs.enqueue(db, kind, {"derivative_id": derivative.id})
+        scheduled.append(derivative)
+    return scheduled
 
 
 def ensure(

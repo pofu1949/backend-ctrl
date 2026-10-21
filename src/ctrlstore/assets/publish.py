@@ -57,8 +57,8 @@ logger = logging.getLogger(__name__)
 #: 会出现在 ``/p/`` 下的可见性。仅站点与私有都不进公开区。
 PUBLIC_VISIBILITIES = frozenset({VISIBILITY_PUBLIC, VISIBILITY_UNLISTED})
 
-#: 允许发布的状态。定时发布只扫这两种，已发布与回收站都不重复处理。
-PUBLISHABLE_STATUSES = frozenset({ASSET_DRAFT, ASSET_ARCHIVED})
+#: 定时发布扫描的状态。已发布内容也允许排未来更新：到点用当前版本重新发布。
+SCHEDULABLE_STATUSES = frozenset({ASSET_DRAFT, ASSET_ARCHIVED, ASSET_PUBLISHED})
 
 
 @dataclass(frozen=True)
@@ -249,7 +249,7 @@ def publish_due(
         .where(
             Asset.publish_at.is_not(None),
             Asset.publish_at <= moment,
-            Asset.status.in_(tuple(PUBLISHABLE_STATUSES)),
+            Asset.status.in_(tuple(SCHEDULABLE_STATUSES)),
         )
         .order_by(Asset.publish_at, Asset.id)
     ).all()
@@ -448,14 +448,14 @@ def sync_links(storage: LocalStorage, asset: Asset) -> bool:
         return False
 
     pairs = wanted.pairs(storage)
-    # 源文件缺一个都不写：宁可整条暂时 404，也不挂出一个指向空文件的地址。
+    # 源文件缺一个都不写：宁可保持旧链接，也不挂出一个指向空文件的地址。
     for source, _target in pairs:
         if not source.is_file():
             raise ApiError.conflict(f"已发布的文件不完整：{source.name}")
 
-    # 先清掉旧扩展名/旧版本号留下的链接：扩展名随真实类型变化，旧地址必须 404。
-    storage.clear_public(asset.id)
-    storage.link_public(pairs, asset_id=asset.id)
+    # 先原子替换仍需保留的文件，再删旧扩展名/旧版本号留下的链接：
+    # 读者不会在重建期间看到 404，旧地址最后才消失。
+    storage.sync_public(pairs, asset_id=asset.id)
     return True
 
 

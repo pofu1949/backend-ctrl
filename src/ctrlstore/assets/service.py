@@ -118,9 +118,9 @@ def register_upload(
         version.extract_status = EXTRACT_SKIPPED
 
     prune_versions(db, storage=storage, asset=asset, settings=settings)
-    # 图片入库后立刻排缩略图；发布不依赖它完成（企划第 8.5 节 D1）。
+    # 图片入库后立刻排缩略图与展示图；发布不依赖它们完成（企划第 8.5 节 D1、D2）。
     if asset.kind == KIND_IMAGE:
-        derivatives.schedule_thumbnail(db, asset=asset, version=version)
+        derivatives.schedule_image_derivatives(db, asset=asset, version=version)
     # 文档与文本排抽取；同样不挡发布（企划第 9 章）。
     content_schedule.schedule(db, asset=asset, version=version)
     audit.record(
@@ -175,6 +175,7 @@ def create_text(
     quota.ensure_capacity(
         db, settings=settings, owner_id=actor.id, extra_bytes=len(data)
     )
+    quota.ensure_item_capacity(db, settings=settings, owner_id=actor.id)
 
     asset = Asset(
         kind=kind,
@@ -309,6 +310,11 @@ def _write_body(
     limit = settings.limits.for_kind(asset.kind)
     if len(data) > limit:
         raise ApiError.too_large(f"正文超过 {asset.kind} 的上限（{limit} 字节）")
+    # 改正文同样产生新版本，必须走与上传相同的配额检查，且在落盘之前。
+    # 配额按内容所有者计，不按本次操作者：编辑改他人内容时，占用记在原作者名下。
+    quota.ensure_capacity(
+        db, settings=settings, owner_id=asset.owner_id, extra_bytes=len(data)
+    )
 
     version_no = next_version_no(db, asset)
     extension = _extension(asset.kind)

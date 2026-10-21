@@ -14,6 +14,7 @@ set -euo pipefail
 SOURCE="${1:-}"
 DATA_DIR="${CTRLSTORE_DATA_DIR:-/var/lib/ctrlstore}"
 CONFIG="${CTRLSTORE_CONFIG:-/etc/ctrlstore/config.toml}"
+SECRETS="${CTRLSTORE_SECRETS_FILE:-/etc/ctrlstore/secrets.env}"
 SERVICES="${CTRLSTORE_SERVICES:-ctrlstore-api@0 ctrlstore-api@1 ctrlstore-worker}"
 CTRLSTORE_BIN="${CTRLSTORE_BIN:-ctrlstore}"
 
@@ -46,9 +47,10 @@ log "清单：$(cat "${MANIFEST}")"
 
 if [ -n "${SERVICES}" ]; then
     log "暂停服务：${SERVICES}"
+    # 先置位再停：stop 失败时退出钩子仍会尝试拉起服务。
+    RESTARTED=1
     # shellcheck disable=SC2086
     systemctl stop ${SERVICES}
-    RESTARTED=1
 fi
 
 log "恢复数据库"
@@ -70,15 +72,22 @@ if [ -f "${SOURCE}/config.toml" ]; then
     install -m 0640 "${SOURCE}/config.toml" "${CONFIG}"
 fi
 
+if [ -f "${SOURCE}/secrets.env" ]; then
+    log "恢复密钥到 ${SECRETS}"
+    install -m 0600 "${SOURCE}/secrets.env" "${SECRETS}"
+else
+    log "警告：备份里没有 secrets.env；已有会话会失效，访问统计口径也会断"
+fi
+
 log "修正属主"
 chown -R ctrlstore:ctrlstore "${DATA_DIR}"
 
 # fsck 需要与 API 相同的配置与密钥。systemd 的 EnvironmentFile 不会自动出现在
 # 这里，所以手动读一次；文件是 VAR=value 形式。
-# shellcheck disable=SC1091
-if [ -f /etc/ctrlstore/secrets.env ]; then
+# shellcheck disable=SC1090
+if [ -f "${SECRETS}" ]; then
     set -a
-    . /etc/ctrlstore/secrets.env
+    . "${SECRETS}"
     set +a
 fi
 

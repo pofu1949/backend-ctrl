@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import column, delete, func, insert, select, table, text
+from sqlalchemy import column, delete, insert, select, table, text
 from sqlalchemy.orm import Session as DbSession
 
 from ..errors import ApiError
@@ -45,13 +45,6 @@ ASSET_SEARCH = table(
     column("body"),
 )
 
-#: FTS5 的 ``rank`` 就是 bm25，越小越相关。
-_FTS_SQL = text(
-    "SELECT asset_id FROM asset_search"
-    " WHERE asset_search MATCH :query AND scope = :scope"
-    " ORDER BY rank, asset_id LIMIT :limit"
-)
-
 
 def refresh(db: DbSession, asset: Asset) -> None:
     """按当前状态重建该资产的两行索引。调用方负责提交。
@@ -74,23 +67,35 @@ def remove(db: DbSession, asset_id: str) -> None:
 
 
 def admin(db: DbSession, *, query: str, limit: int = MAX_RESULTS) -> tuple[str, list[Asset]]:
-    """管理端搜索：返回 (模式, 内容)。回收站默认不出现。"""
+    """管理端搜索：返回 (模式, 内容)。回收站在取前 50 条之前就排除。"""
     term = clean_query(query)
     limit = _clamp(limit)
-    mode, ids = _search(db, term, scope=SCOPE_ADMIN, limit=limit)
+    mode, ids = _search(
+        db, term, scope=SCOPE_ADMIN, limit=limit, where_sql="assets.status != 'trashed'"
+    )
     assets = _load(db, ids, status_filter=ASSET_TRASHED, invert=True)
     return mode, assets
 
 
-def published(db: DbSession, *, query: str, limit: int = MAX_RESULTS) -> tuple[str, list[Asset]]:
-    """站点搜索的候选集：只含已发布内容。
+def published(
+    db: DbSession, *, query: str, site_id: str, limit: int = MAX_RESULTS
+) -> tuple[str, list[Asset]]:
+    """站点搜索：只取该站点能读的已发布内容，再截到 50 条。
 
-    调用方还必须用 ``public_api.deps.can_read_asset`` 过滤——这里只负责
-    「发布快照里有这些字」，不负责「这个站点能看」。
+    可见性在 SQL 里先收窄：公开可读；仅站点要求出现在该站已授权的集合里；
+    未列出、私有、草稿都不出现在发现型结果里。这样前面的私有命中不会挤掉
+    后面的公开内容（企划第 8.7 节）。
     """
     term = clean_query(query)
     limit = _clamp(limit)
-    mode, ids = _search(db, term, scope=SCOPE_PUBLISHED, limit=limit)
+    mode, ids = _search(
+        db,
+        term,
+        scope=SCOPE_PUBLISHED,
+        limit=limit,
+        where_sql=_published_where(),
+        params={"site_id": site_id},
+    )
     assets = _load(db, ids, status_filter=ASSET_PUBLISHED, invert=False)
     return mode, assets
 
@@ -107,36 +112,78 @@ def clean_query(query: str) -> str:
 
 # —— 内部 ——
 
+#: 站点可见性过滤：公开可读；仅站点必须在已授权集合里。
+#: 与 ``public_api.deps.can_read_asset`` 的规则一致，只是提前到 SQL 里，
+#: 这样私有的已发布内容不会占满 50 条名额。
+_PUBLISHED_WHERE = (
+    "assets.status = 'published' AND (assets.visibility = 'public' OR "
+    "(assets.visibility = 'site' AND EXISTS ("
+    "SELECT 1 FROM collection_items ci "
+    "JOIN collections c ON c.id = ci.collection_id "
+    "JOIN site_grants g ON g.site_id = :site_id "
+    "WHERE ci.asset_id = assets.id "
+    "AND (c.slug = g.prefix OR c.slug LIKE g.prefix || '.%'))))"
+)
 
-def _search(db: DbSession, term: str, *, scope: str, limit: int) -> tuple[str, list[str]]:
-    """三字及以上走 FTS，一两个字只匹配标题/文件名/标签。"""
+_SEARCH_HEAD = (
+    "SELECT asset_search.asset_id FROM asset_search "
+    "JOIN assets ON assets.id = asset_search.asset_id "
+)
+
+_FTS_MATCH = "asset_search MATCH :query AND asset_search.scope = :scope AND "
+_SHORT_MATCH = (
+    "asset_search.scope = :scope AND "
+    "(instr(lower(asset_search.title), :needle) > 0 OR "
+    "instr(lower(asset_search.keywords), :needle) > 0) AND "
+)
+
+
+def _published_where() -> str:
+    return _PUBLISHED_WHERE
+
+
+def _search(
+    db: DbSession,
+    term: str,
+    *,
+    scope: str,
+    limit: int,
+    where_sql: str,
+    params: dict | None = None,
+) -> tuple[str, list[str]]:
+    """三字及以上走 FTS，一两个字只匹配标题/文件名/标签。
+
+    ``where_sql`` 在 LIMIT 之前应用：先按状态与授权收窄，再取前 N 条。
+    """
+    values = {"scope": scope, "limit": limit, **(params or {})}
     if len(term) >= SHORT_QUERY_LENGTH:
-        rows = db.execute(
-            _FTS_SQL, {"query": _phrase(term), "scope": scope, "limit": limit}
-        ).all()
-        return "fts", [row[0] for row in rows]
-
-    needle = term.lower()
-    rows = db.execute(
-        select(ASSET_SEARCH.c.asset_id)
-        .where(
-            ASSET_SEARCH.c.scope == scope,
-            _contains(ASSET_SEARCH.c.title, needle)
-            | _contains(ASSET_SEARCH.c.keywords, needle),
+        statement = (
+            _SEARCH_HEAD
+            + "WHERE "
+            + _FTS_MATCH
+            + where_sql
+            + " ORDER BY rank, asset_search.asset_id LIMIT :limit"
         )
-        .limit(limit)
-    ).all()
-    return "title", [row[0] for row in rows]
+        values["query"] = _phrase(term)
+        mode = "fts"
+    else:
+        statement = (
+            _SEARCH_HEAD
+            + "WHERE "
+            + _SHORT_MATCH
+            + where_sql
+            + " ORDER BY asset_search.rowid LIMIT :limit"
+        )
+        values["needle"] = term.lower()
+        mode = "title"
+
+    rows = db.execute(text(statement), values).all()
+    return mode, [row[0] for row in rows]
 
 
 def _phrase(term: str) -> str:
     """FTS5 短语：整段作为一个子串匹配，内部的引号按 FTS5 规则转义。"""
     return '"' + term.replace('"', '""') + '"'
-
-
-def _contains(column_expr, needle: str):
-    """SQLite 的 instr 不认通配符，查询词里的 % 与 _ 按字面处理。"""
-    return func.instr(func.lower(column_expr), needle) > 0
 
 
 def _load(

@@ -60,7 +60,7 @@ def test_owner_health_reports_details(owner_client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["app_version"]
-    assert body["schema_version"] == "0009"
+    assert body["schema_version"] == "0010"
     assert set(body["jobs"]) == {"pending", "running", "done", "failed"}
     assert body["disk"]["free_bytes"] > 0
     assert body["last_backup"] is None

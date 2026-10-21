@@ -40,6 +40,7 @@ def create(
     subject_type: str,
     subject_id: str,
     expires_at: datetime | None = None,
+    allowed_ip: str | None = None,
 ) -> tuple[str, ApiToken]:
     """签发令牌，返回 (明文, 记录)。明文只在这一刻存在。"""
     secret = new_secret()
@@ -48,6 +49,7 @@ def create(
         token_hash=hash_secret(secret),
         subject_type=subject_type,
         subject_id=subject_id,
+        allowed_ip=_clean_allowed_ip(allowed_ip),
         expires_at=expires_at,
         created_at=utcnow(),
     )
@@ -56,8 +58,10 @@ def create(
     return f"{token.id}.{secret}", token
 
 
-def resolve(db: DbSession, raw: str) -> tuple[ApiToken, User | Site] | None:
-    """校验令牌并返回其主体。过期、撤销或主体已停用都返回 ``None``。"""
+def resolve(
+    db: DbSession, raw: str, *, ip: str | None = None
+) -> tuple[ApiToken, User | Site] | None:
+    """校验令牌并返回其主体。过期、撤销、来源 IP 不符或主体已停用都返回 ``None``。"""
     token_id, _, secret = raw.partition(".")
     if not token_id or not secret:
         return None
@@ -66,6 +70,8 @@ def resolve(db: DbSession, raw: str) -> tuple[ApiToken, User | Site] | None:
     if token is None or token.revoked_at is not None:
         return None
     if not hmac.compare_digest(token.token_hash, hash_secret(secret)):
+        return None
+    if not _ip_allowed(token.allowed_ip, ip):
         return None
 
     now = utcnow()
@@ -78,6 +84,24 @@ def resolve(db: DbSession, raw: str) -> tuple[ApiToken, User | Site] | None:
 
     token.last_used_at = now
     return token, subject
+
+
+def _clean_allowed_ip(value: str | None) -> str | None:
+    """把逗号分隔的 IP 列表规整成一个字符串；空值表示不限制。"""
+    if not value:
+        return None
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    return ",".join(parts) or None
+
+
+def _ip_allowed(allowed_ip: str | None, ip: str | None) -> bool:
+    """未绑定 IP 的令牌不受限；绑定了就必须匹配其中一个。"""
+    if not allowed_ip:
+        return True
+    if not ip:
+        return False
+    allowed = {part.strip() for part in allowed_ip.split(",") if part.strip()}
+    return ip in allowed
 
 
 def _load_subject(db: DbSession, token: ApiToken) -> User | Site | None:

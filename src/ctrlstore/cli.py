@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.orm import sessionmaker
 
 from . import __version__, fsck
+from .assets import publish as publish_service
 from .assets import service as asset_service
 from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
@@ -107,6 +108,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     upload.set_defaults(handler=_cmd_import)
 
+    publish = subcommands.add_parser("publish", help="发布内容（所有者）")
+    publish.add_argument("asset_id")
+    publish.set_defaults(handler=_cmd_publish)
+
+    unpublish = subcommands.add_parser("unpublish", help="撤回内容（所有者）")
+    unpublish.add_argument("asset_id")
+    unpublish.set_defaults(handler=_cmd_unpublish)
+
     fsck = subcommands.add_parser("fsck", help="检查库记录与磁盘是否一致")
     fsck.add_argument(
         "--fix-public-links",
@@ -185,6 +194,11 @@ def _build_token_commands(subcommands) -> None:
     subject.add_argument("--site", help="站点标识")
     subject.add_argument("--user", help="用户名，用于命令行访问")
     create.add_argument("--name", default="", help="令牌备注名")
+    create.add_argument(
+        "--allowed-ip",
+        default=None,
+        help="允许的来源 IP，逗号分隔多个；默认不限制",
+    )
     create.add_argument("--expires-days", type=int, default=None, help="多少天后过期，默认不过期")
     create.set_defaults(handler=_cmd_token_create)
 
@@ -414,12 +428,22 @@ def _cmd_token_create(args: argparse.Namespace) -> int:
             if site is None:
                 raise ApiError.invalid(f"站点不存在：{args.site}")
             plaintext, token = service.issue_site_token(
-                db, site=site, name=args.name, expires_at=expires_at, actor=owner
+                db,
+                site=site,
+                name=args.name,
+                expires_at=expires_at,
+                actor=owner,
+                allowed_ip=args.allowed_ip,
             )
         else:
             user = _find_user(db, args.user)
             plaintext, token = service.issue_user_token(
-                db, user=user, name=args.name, expires_at=expires_at, actor=owner
+                db,
+                user=user,
+                name=args.name,
+                expires_at=expires_at,
+                actor=owner,
+                allowed_ip=args.allowed_ip,
             )
         print(f"已签发令牌：{token.name}（{token.id}）")
         print("令牌只显示这一次，请立即保存：")
@@ -474,6 +498,36 @@ def _cmd_import(args: argparse.Namespace) -> int:
         duplicate = upload_service.duplicate_of(db, session)
         if duplicate:
             print(f"提示：库中已有相同字节的上传（{duplicate}）")
+    return 0
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """命令行发布。没管理端时也必须能做（企划第 13.4 节）。"""
+    settings = _load(args)
+    storage = LocalStorage.from_settings(settings)
+    with _session(settings) as db:
+        owner = _actor(db)
+        asset = asset_service.get_asset(db, args.asset_id)
+        publish_service.publish(
+            db, storage=storage, asset=asset, revision=asset.revision, actor=owner
+        )
+        print(f"已发布：{asset.id}")
+        print(f"状态：{asset.status}；已发布版本：{asset.published_version_id}")
+        print(f"修订号：{asset.revision}")
+    return 0
+
+
+def _cmd_unpublish(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    storage = LocalStorage.from_settings(settings)
+    with _session(settings) as db:
+        owner = _actor(db)
+        asset = asset_service.get_asset(db, args.asset_id)
+        publish_service.unpublish(
+            db, storage=storage, asset=asset, revision=asset.revision, actor=owner
+        )
+        print(f"已撤回：{asset.id}")
+        print(f"状态：{asset.status}；修订号：{asset.revision}")
     return 0
 
 

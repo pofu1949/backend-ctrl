@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 6 部分（集合与网站只读契约）已完成**。缩略图与派生、后台任务、管理页面尚未实现。
+当前进度：**第 1–9 部分已完成**。管理端图形界面（第 10 部分）尚未开始。
 
 ## 目录
 
@@ -60,12 +60,21 @@ backend_ctrl/
       payloads.py           公开响应形状
       collections.py assets.py files.py
     fsck.py                 一致性检查
-    imaging/                第 7 部分
-  alembic/                  迁移脚本（0001 基线 … 0006 发布快照）
+    imaging/                缩略图与展示图
+    jobs/                   任务队列与处理器（缩略图、抽取、视频、定时发布、清理）
+    stats/                  访问统计与主面板数据
+    search/                 FTS5 索引与检索
+    content/                文本抽取、表格预览、视频探测
+    worker.py               后台 worker 入口
+    quota.py                字节与条数配额
+    backup.py               备份清单读取（健康接口）
+  alembic/                  迁移脚本（0001 基线 … 0010 令牌 IP 与路径账本）
   deploy/
-    nginx/ctrlstore.conf.example
-    systemd/                第 9 部分
-  scripts/                  备份与恢复
+    nginx/nginx.conf.example           worker_processes 2 的主配置
+    nginx/ctrlstore.conf.example       站点片段
+    systemd/                           API 模板、slice、worker
+    Dockerfile / docker-compose.example.yml   可选容器跑法
+  scripts/                  停写备份与恢复
   tests/                    pytest
 ```
 
@@ -125,12 +134,14 @@ ctrlstore owner reset-password              # 只重置现有所有者，不新�
 
 ctrlstore site create <标识> [--name 显示名]
 ctrlstore site list
-ctrlstore token create (--site 标识 | --user 用户名) [--name 备注] [--expires-days N]
+ctrlstore token create (--site 标识 | --user 用户名) [--name 备注] [--expires-days N] [--allowed-ip IP]
 ctrlstore token list
 ctrlstore token revoke <令牌 ID>
 
 ctrlstore import <本地路径> [--asset-id <ID>]   # 从服务器路径导入；带 ID 则作为新版本
-ctrlstore worker [--once]                   # 后台任务：缩略图、定时发布、到期清理
+ctrlstore publish <内容 ID>                 # 命令行发布（所有者）
+ctrlstore unpublish <内容 ID>               # 命令行撤回（所有者）
+ctrlstore worker [--once]                   # 后台任务：缩略图、抽取、视频、定时发布、清理
 ctrlstore jobs list [--status failed]       # 任务与最近一次错误
 ctrlstore fsck [--fix-public-links] [--skip-hashes]   # 一致性检查
 ```
@@ -227,6 +238,9 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 Cookie 会话的所有写操作必须带 `X-CSRF-Token` 头，值取自 `POST /session` 或 `GET /me` 的 `csrf_token`。
 校验放在依赖 `writer` 里，新增写接口自动受保护，不会漏。令牌通道跳过 CSRF 校验（没有浏览器环境，也就没有 CSRF 面）。
 
+令牌可以绑定允许的来源 IP（`allowed_ip`，逗号分隔多个；空表示不限制）。解析令牌时先比对
+`X-Forwarded-For` 的第一段，不匹配按无效令牌处理。命令行与站点令牌同一规则。
+
 登录失败按「账号 + IP」限速：窗口 5 分钟内 5 次。计数放在进程内存，两个 API 进程各自计数；
 密码用 Argon2id，单次尝试本身就有成本，这个额度够用。
 
@@ -307,6 +321,9 @@ data/tmp/uploads/<session>/parts/000001.part   未完成的分片
 
 名称唯一，`slug` 由名称派生（空白与标点折叠成 `-`，中文原样保留；折叠后撞车自动加序号）。
 内容打标签只给名字：不存在的标签当场创建，调用方不需要先建后关联。
+
+两个不同写法指同一件事时，所有者用 `POST /api/admin/v1/tags/{id}/merge`（`{"into": "目标标签 ID"}`）
+把内容整体改挂过去并删除来源标签；受影响内容的检索索引同步重建。不能合并到自己。
 
 ### 内容
 
@@ -402,6 +419,13 @@ public/<asset_id>/thumb.webp            已就绪的缩略图（地址 /p/<id>/t
 失败一律落在「更不可访问」这一侧：发布时先提交状态再建链接（链接失败 = 公开地址 404，
 不会泄露未发布内容）；撤回时先删链接再提交状态（提交失败也只是 404）。残留的链接由
 `fsck` 收掉。
+
+再次发布不再先清空目录：新文件逐个以临时名 + `os.replace` 原子替换，旧的扩展名/版本号
+最后才删除，读者不会在重建期间看到 404。撤回、归档、进回收站仍整目录清掉。
+
+`POST …/publish` 与 `POST …/unpublish` 接受 `Idempotency-Key`：同一密钥、同一请求体
+24 小时内返回第一次的结果，不再增加修订号，也不重复改公开区；同一密钥换了请求体返回 409。
+命令行 `ctrlstore publish` / `unpublish` 直接改状态，不需要幂等键。
 
 `published_version_id` 非空当且仅当当前处于已发布状态：撤回、归档、进回收站都会清空
 发布快照，公开查询因此只需要判断一个条件。
@@ -558,7 +582,7 @@ POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": fa
 | 类型 | 作用 |
 | --- | --- |
 | `image.thumb` | 缩略图：最长边 480 的 WebP |
-| `image.display` | 展示图：最长边 1600 的 WebP。任务类型已留好，默认不入队（企划第 8.5 节 D2） |
+| `image.display` | 展示图：最长边 1600 的 WebP，随缩略图一起入队 |
 | `content.extract` | 文档/文本抽取、xlsx 预览、PDF 首页图 |
 | `video.inspect` | ffprobe 判断能否播放，ffmpeg 截封面 |
 | `publish.due` | 把到点的定时发布送出去 |
@@ -585,8 +609,11 @@ POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": fa
 `POST /api/admin/v1/assets/{id}/publish` 带未来的 `publish_at` 时只登记计划：不写快照、
 不进公开区。到点后由 `publish.due` 按第 5 部分的同一顺序执行——先提交快照，再按可见性挂链接。
 
+已发布内容也可以定时更新：到点用**当前版本**重新发布，线上在那之前保持旧版本。手动发布、
+撤回、归档、进回收站都会取消定时。
+
 发不出去（例如正文引用了未发布图片）会取消定时并写 `asset_publish_failed` 审计，
-不会每分钟重试一次。手动发布、撤回、归档、进回收站都会一并取消定时。
+不会每分钟重试一次。
 
 ### 保留与清理
 
@@ -647,7 +674,8 @@ curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 多了 thumb
 没有补报入口：日期只取服务器**收到请求**的时间，请求里带 `date` 之类的字段会被忽略。
 
 限速按站点、每分钟 `pageview_rate_per_minute`（默认 600）计；与登录限速一样计数放在
-进程内存，两个 API 进程各自计数。额度远高于正常转发量，只用来挡刷量。
+进程内存，两个 API 进程各自计数——**实际全局额度约为配置值的两倍**。额度远高于正常
+转发量，只用来挡刷量。
 
 ### 存了什么
 
@@ -655,6 +683,8 @@ curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 多了 thumb
 * `pageview_events`：24 小时内的 `event_id`，用来去重。
 * `pageview_visitors`：当日已计过人数的 HMAC；**原始标识、IP、查询串都不入库**。
 * `pageview_paths`：按路径的次数；一天超过 500 条不同路径时，其余并入「其他」。
+  被并入的路径次数另记在 `pageview_merged_paths`；它再次出现时可以恢复成独立一行，
+  不会永远沉在「其他」里。
 
 三张明细表保留 400 天（含今天），由 worker 的 `maintenance.cleanup` 删除；删明细不改
 已经写好的日汇总。访客 HMAC 用 `pageview_hmac_secret`，**不要在某一天中途更换密钥**，
@@ -699,7 +729,8 @@ Windows 开发与测试靠这个包）。
 固定上限：解压后 ≤ 200 MB、压缩包条目 ≤ 2000、单文件处理 ≤ 60 秒、PDF ≤ 500 页、
 Excel ≤ 20 表 × 100 行 × 50 列、抽取文本 ≤ 20000 字符（超出截断并标记）。
 超限、加密、损坏、没有文本都属于确定性结果，记 `failed` 或 `skipped` 后结束任务，
-**不重试**——重试解决不了这些问题，只会堵住后面的任务。
+**不重试**——重试解决不了这些问题，只会堵住后面的任务。60 秒上限除循环检查外，
+Linux 上还用 `SIGALRM` 给单次库调用一个硬超时；ZIP 另查压缩比，防中央目录谎报大小。
 
 `GET /api/public/v1/assets/{id}/table?sheet=0&limit=100` 读已发布版本的预览：
 
@@ -722,14 +753,15 @@ Excel ≤ 20 表 × 100 行 × 50 列、抽取文本 ≤ 20000 字符（超出�
 * `published`：发布快照与**已发布版本**正文。
 
 `GET /api/admin/v1/search?q=…`（`asset.read`）三字及以上查全文，一两个字只查
-标题/文件名/标签，最多 50 条；回收站不出现。
+标题/文件名/标签，最多 50 条；回收站在取前 50 条之前就排除。
 
 `GET /api/public/v1/search?q=…` 默认关闭（`site_search_enabled = false`），打开后
 必须带站点令牌，并且：
 
 1. 只查 `published` 索引行——草稿、待发布替换、未授权正文都不在其中；
-2. 结果再逐个过 `searchable`：公开可读，仅站点必须在已授权集合里，
-   「未列出」不出现在发现型结果里。
+2. 在 SQL 里先按可见性收窄（公开可读；仅站点必须在已授权集合里；未列出不出现），
+   再取前 50 条；结果最后仍逐个过 `searchable` 复核。这样私有的已发布内容不会
+   占满名额，把后面的公开文章挤掉。
 
 索引在内容变更时整体重建（标题、标签、正文、版本、发布状态、抽取完成），
 所以不存在「改了标题还能搜到旧值」的中间状态。升级时迁移会按现有内容回填一次；
@@ -751,14 +783,18 @@ Excel ≤ 20 表 × 100 行 × 50 列、抽取文本 ≤ 20000 字符（超出�
 
 ## 配额
 
-`user_quota_bytes` 与 `library_quota_bytes` 默认 0，表示不限。计入：
+用户与全库各有两条配额，默认 0 表示不限：
 
-* 未彻底删除的所有版本（含回收站）；
-* 所有派生文件（缩略图、封面、预览 JSON）。
+* 字节：`user_quota_bytes` / `library_quota_bytes`；
+* 条数：`user_quota_items` / `library_quota_items`。
 
-公开区的硬链接不是新字节，不重复计；临时分片不在库里，只受磁盘阈值约束。
-上传在开会话时按该类型上限预估一次，合并时按真实字节再检查一次。超限返回
-507 `insufficient_storage`，并清理已写入的临时文件。
+字节计入未彻底删除的所有版本（含回收站）与所有派生文件（缩略图、展示图、封面、
+预览 JSON）；条数只按内容计，一条内容不论多少版本都算 1。公开区硬链接不是新字节，
+不重复计；临时分片不在库里，只受磁盘阈值约束。
+
+**计账主体是内容所有者**：编辑替换他人内容时，新版本仍记在原所有者名下。
+上传在开会话时按类型上限预估一次、合并时按真实字节再检查一次；直接改 Markdown /
+纯文本正文走同一条检查，且在落盘之前。超限返回 507 `insufficient_storage`。
 
 ## 运维：备份、恢复与 systemd
 
@@ -773,9 +809,10 @@ sudo CTRLSTORE_DATA_DIR=/var/lib/ctrlstore \
 ```
 
 它会停掉两个 API 实例与 worker，做 WAL checkpoint、SQLite `.backup`，在同一窗口复制
-`originals/`、`derivatives/` 与配置，最后写 `manifest.json`（应用版本、迁移版本、
-起止时间、文件数）。中途失败的目录会被改名成 `*.failed`，不能当恢复源。
-`public/` 与 `tmp/` 不备份。备份目录应在另一块盘上。
+`originals/`、`derivatives/`、配置与 `secrets.env`，最后写 `manifest.json`（应用版本、
+迁移版本、起止时间、文件数）。密钥文件保持 0600，且不进入版本库。
+只要开始停服务，退出钩子就会尝试把服务拉起来——`systemctl stop` 失败时也一样；失败
+目录会被改名成 `*.failed`，不能当恢复源。`public/` 与 `tmp/` 不备份。备份目录应在另一块盘上。
 
 ### 恢复
 
@@ -783,9 +820,9 @@ sudo CTRLSTORE_DATA_DIR=/var/lib/ctrlstore \
 sudo scripts/restore.sh /var/backups/ctrlstore/20261021-030000
 ```
 
-只接受 `status=complete` 的清单。恢复数据库与文件、修正属主、按已提交的发布快照
-执行 `ctrlstore fsck --fix-public-links`，再启动服务。恢复与升级分开：先回到清单上的
-应用版本，核对集合 API、原图、视频、权限与版本，确认后再单独升级。
+只接受 `status=complete` 的清单。恢复数据库、文件、配置与密钥，修正属主，按已提交的
+发布快照执行 `ctrlstore fsck --fix-public-links`，再启动服务。恢复与升级分开：先回到清单
+上的应用版本，核对集合 API、原图、视频、权限与版本，确认后再单独升级。
 `published_slug` 与 `published_references` 在数据库里，随 SQLite 备份走，恢复脚本
 不会用编辑中的 `slug` 或 `asset_references` 重写它们。
 
@@ -804,13 +841,23 @@ sudo systemctl enable --now ctrlstore-api.slice ctrlstore-api@0 ctrlstore-api@1 
 `ctrlstore-api@0` 监听 8000，`@1` 监听 8001，两者同属 `ctrlstore-api.slice`，
 合计内存上限 512M；worker 单独一个进程，`MemoryMax=768M`。密钥放
 `/etc/ctrlstore/secrets.env`（`VAR=value`，0600），systemd 用 `EnvironmentFile` 读。
-Nginx 示例的上游已指向这两个端口。
+
+Nginx 全局的 `worker_processes 2` 写在主配置里（`deploy/nginx/nginx.conf.example`），
+不要放进 `sites-available` 片段；站点片段的上游已指向 8000/8001。
+
+仓库同时提供可选容器跑法：`deploy/Dockerfile` 与 `deploy/docker-compose.example.yml`
+（一个 API 容器 + 一个 worker 容器）。数据目录用 volume 共享，`public/` 仍由宿主机
+Nginx 直接 alias；容器不是默认部署方式，systemd 仍是主路径。
 
 ### 健康
 
 `GET /healthz` 仍然只返回 `{"status":"ok"|"degraded"}`。所有者的
 `GET /api/admin/v1/health` 另给磁盘剩余/总量、队列状态计数、应用与迁移版本、
 上次成功备份（读 `backup_dir` 下最新完整清单）。
+
+可用内存低于 `min_available_memory_bytes`（默认 1 GB）时：新上传、导入与合并返回 507；
+队列里的解码类任务（缩略图、展示图、抽取、视频探测）不开始执行，退回 `pending` 且
+不消耗重试次数，内存恢复后继续；读取、撤回与已发布文件的公开访问不受影响。
 
 ## 数据库
 
@@ -824,7 +871,8 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
 `0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本，
 `0005` 集合与站点授权，`0006` 发布快照补别名与图片引用，`0007` 后台任务、派生文件与定时发布，
-`0008` 访问统计（日汇总、事件、访客与路径），`0009` 全文检索（FTS5）与派生文件字节。
+`0008` 访问统计（日汇总、事件、访客与路径），`0009` 全文检索（FTS5）与派生文件字节，
+`0010` 令牌来源 IP 与路径合并账本。
 「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」「同一集合内同一内容只出现一次、
 位置唯一」「已发布别名唯一」都由库层约束兜底，不只靠应用代码。
 时间一律按 UTC 存不带时区的值。

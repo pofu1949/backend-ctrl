@@ -120,6 +120,27 @@ def test_worker_writes_480px_webp(
     assert _jobs_of(db, jobs.KIND_THUMB)[0].status == JOB_DONE
 
 
+def test_worker_writes_1600px_display(
+    owner_client: TestClient, db: DbSession, settings, storage
+) -> None:
+    created = _image(owner_client, "large.png", minimal_png(2000, 1000))
+
+    run_until_idle(settings)
+
+    db.expire_all()
+    derivative = db.scalar(
+        select(Derivative)
+        .join(Derivative.version)
+        .where(
+            AssetVersion.asset_id == created["asset_id"],
+            Derivative.purpose == "display",
+        )
+    )
+    assert derivative is not None and derivative.status == DERIVATIVE_READY
+    with Image.open(storage.derivative_path(derivative.storage_key)) as image:
+        assert image.size == (1600, 800)
+
+
 def test_publish_links_ready_thumbnail(
     owner_client: TestClient, client: TestClient, db: DbSession, storage
 ) -> None:
@@ -131,11 +152,13 @@ def test_publish_links_ready_thumbnail(
         f"{created['asset_id']}/original.png",
         f"{created['asset_id']}/v/1/original.png",
         f"{created['asset_id']}/thumb.webp",
+        f"{created['asset_id']}/display.webp",
     }
 
     payload = client.get(f"/api/public/v1/assets/{created['asset_id']}").json()
-    assert set(payload["urls"]) == {"original", "thumb"}
+    assert set(payload["urls"]) == {"original", "thumb", "display"}
     assert _thumb_url(payload).endswith(f"/p/{created['asset_id']}/thumb.webp")
+    assert payload["urls"]["display"].endswith(f"/p/{created['asset_id']}/display.webp")
     assert published["status"] == "published"
 
 
@@ -153,7 +176,7 @@ def test_thumbnail_finishing_after_publish_is_linked(
     run_until_idle(settings)
 
     payload = client.get(f"/api/public/v1/assets/{created['asset_id']}").json()
-    assert set(payload["urls"]) == {"original", "thumb"}
+    assert set(payload["urls"]) == {"original", "thumb", "display"}
     assert f"{created['asset_id']}/thumb.webp" in _public_files(storage, created["asset_id"])
 
 

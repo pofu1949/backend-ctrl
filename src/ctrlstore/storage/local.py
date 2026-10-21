@@ -273,6 +273,31 @@ class LocalStorage:
             raise
         return linked
 
+    def sync_public(self, pairs: Iterable[tuple[Path, Path]], *, asset_id: str) -> list[Path]:
+        """让公开区与给定文件集一致，但**不先清空目录**。
+
+        读者正在访问当前版地址时，重建不能留下 404 窗口：先把每个目标以
+        ``.tmp`` + ``os.replace`` 换上新内容（原子替换），再删掉不再需要的旧文件。
+        扩展名变化时新旧地址会短暂并存，旧地址仍然可用，最后一步才消失。
+        """
+        wanted = {target for _, target in pairs}
+        linked = self.link_public(pairs, asset_id=asset_id, clear_on_error=False)
+
+        for path in self.public_files(asset_id):
+            if path not in wanted:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+        # 清掉旧版本号留下的空目录；内容目录本身保留。
+        root = self.public_dir_for(asset_id)
+        for directory in sorted(
+            (item for item in root.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+        return linked
+
     def clear_public(self, asset_id: str) -> None:
         """删掉一个内容在公开区的全部链接（含版本目录与残留 .tmp）。"""
         shutil.rmtree(self.public_dir_for(asset_id), ignore_errors=True)

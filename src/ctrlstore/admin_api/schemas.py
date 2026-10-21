@@ -106,6 +106,8 @@ class TokenOut(BaseModel):
     created_at: datetime
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
+    #: 绑定的来源 IP；空表示不限制。
+    allowed_ip: str | None = None
     revoked: bool
 
     @classmethod
@@ -118,6 +120,7 @@ class TokenOut(BaseModel):
             created_at=token.created_at,
             expires_at=token.expires_at,
             last_used_at=token.last_used_at,
+            allowed_ip=token.allowed_ip,
             revoked=token.revoked_at is not None,
         )
 
@@ -133,3 +136,8 @@ class CreateTokenRequest(BaseModel):
     subject_type: str = Field(pattern="^(site|user)$")
     subject_key: str = Field(min_length=1, description="站点标识或用户名")
     expires_at: datetime | None = None
+    allowed_ip: str | None = Field(
+        default=None,
+        max_length=128,
+        description="允许的来源 IP，逗号分隔多个；空表示不限制",
+    )

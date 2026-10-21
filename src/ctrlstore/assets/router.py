@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session as DbSession
 
+from .. import idempotency
 from ..auth import deps
 from ..errors import ApiError
 from ..models import ASSET_PUBLISHED
@@ -40,6 +41,49 @@ def _storage(request: Request) -> LocalStorage:
 
 def _detail(asset) -> AssetDetailOut:
     return AssetDetailOut.detailed(asset, current=service.current_version(asset))
+
+
+def _replayed(
+    request: Request, principal: deps.Principal, payload: VersionActionRequest, db: DbSession
+) -> AssetDetailOut | None:
+    """带 Idempotency-Key 的重试：返回第一次的结果，不再动状态（企划第 13.3 节）。"""
+    key = request.headers.get(idempotency.HEADER)
+    if not key or principal.user is None:
+        return None
+    stored = idempotency.lookup(
+        db,
+        actor_id=principal.user.id,
+        method="POST",
+        path=request.url.path,
+        key=key,
+        request_hash=idempotency.hash_request(payload.model_dump_json()),
+    )
+    if stored is None:
+        return None
+    return AssetDetailOut(**stored.body)
+
+
+def _remember(
+    request: Request,
+    principal: deps.Principal,
+    payload: VersionActionRequest,
+    result: AssetDetailOut,
+    db: DbSession,
+) -> None:
+    """记下这次结果。调用方随后统一提交。"""
+    key = request.headers.get(idempotency.HEADER)
+    if not key or principal.user is None:
+        return
+    idempotency.remember(
+        db,
+        actor_id=principal.user.id,
+        method="POST",
+        path=request.url.path,
+        key=key,
+        request_hash=idempotency.hash_request(payload.model_dump_json()),
+        status=200,
+        body=result.model_dump(mode="json"),
+    )
 
 
 @router.get("/assets", response_model=AssetListOut)
@@ -161,6 +205,10 @@ def publish_asset(
     由 worker 的每分钟任务执行（企划第 8.6 节 P0-7）。
     """
     asset = service.get_asset(db, asset_id)
+    replayed = _replayed(request, principal, payload, db)
+    if replayed is not None:
+        return replayed
+
     if payload.publish_at is not None and publish.is_future(payload.publish_at):
         publish.schedule(
             db,
@@ -177,7 +225,9 @@ def publish_asset(
             revision=payload.revision,
             actor=principal.user,
         )
-    return _detail(asset)
+    result = _detail(asset)
+    _remember(request, principal, payload, result, db)
+    return result
 
 
 @router.post("/assets/{asset_id}/unpublish", response_model=AssetDetailOut)
@@ -190,10 +240,16 @@ def unpublish_asset(
 ) -> AssetDetailOut:
     """撤回发布：公开地址立即 404，管理端仍能下载原件。"""
     asset = service.get_asset(db, asset_id)
+    replayed = _replayed(request, principal, payload, db)
+    if replayed is not None:
+        return replayed
+
     publish.unpublish(
         db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
     )
-    return _detail(asset)
+    result = _detail(asset)
+    _remember(request, principal, payload, result, db)
+    return result
 
 
 @router.post("/assets/{asset_id}/archive", response_model=AssetDetailOut)

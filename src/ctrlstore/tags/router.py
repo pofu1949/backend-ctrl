@@ -28,6 +28,10 @@ class CreateTagRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
 
+class MergeTagRequest(BaseModel):
+    into: str = Field(min_length=1, description="接收内容的标签 ID")
+
+
 @router.get("/tags", response_model=list[TagOut])
 def list_tags(
     q: str | None = Query(default=None, description="按名称子串筛选"),
@@ -46,3 +50,17 @@ def create_tag(
     """按名称取或建。内容打标签时会自动调用同一函数，因此这里也能当"确保存在"用。"""
     tag: Tag = service.ensure_tag(db, payload.name, actor=principal.user)
     return TagOut.model_validate(tag)
+
+
+@router.post("/tags/{tag_id}/merge", response_model=TagOut)
+def merge_tag(
+    tag_id: str,
+    payload: MergeTagRequest,
+    principal: deps.Principal = Depends(deps.owner_writer),
+    db: DbSession = Depends(deps.get_db),
+) -> TagOut:
+    """把所有用 ``tag_id`` 的内容改挂到 ``into``，再删除 ``tag_id``。仅所有者。"""
+    source = service.get_tag(db, tag_id)
+    target = service.get_tag(db, payload.into)
+    merged = service.merge_tags(db, source=source, target=target, actor=principal.user)
+    return TagOut.model_validate(merged)

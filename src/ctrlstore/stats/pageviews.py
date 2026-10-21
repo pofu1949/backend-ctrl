@@ -18,7 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session as DbSession
 
@@ -29,6 +29,7 @@ from ..models import (
     PAGEVIEW_OTHER_PATH,
     PageviewDaily,
     PageviewEvent,
+    PageviewMergedPath,
     PageviewPath,
     PageviewVisitor,
     utcnow,
@@ -165,12 +166,20 @@ def purge_old(
     cutoff = shift_day(today or local_day(), -(detail_days - 1))
     visitors = db.execute(delete(PageviewVisitor).where(PageviewVisitor.day < cutoff)).rowcount
     paths = db.execute(delete(PageviewPath).where(PageviewPath.day < cutoff)).rowcount
+    merged = db.execute(
+        delete(PageviewMergedPath).where(PageviewMergedPath.day < cutoff)
+    ).rowcount
     events = db.execute(
         delete(PageviewEvent).where(
             PageviewEvent.received_at < utcnow() - timedelta(hours=event_hours)
         )
     ).rowcount
-    return {"visitors": visitors or 0, "paths": paths or 0, "events": events or 0}
+    return {
+        "visitors": visitors or 0,
+        "paths": paths or 0,
+        "merged_paths": merged or 0,
+        "events": events or 0,
+    }
 
 
 # —— 内部 ——
@@ -211,6 +220,18 @@ def _bump_day(db: DbSession, *, site_id: str, day: str, new_visitor: bool) -> No
 
 
 def _bump_path(db: DbSession, *, site_id: str, day: str, path: str) -> None:
+    """给路径加一次。被并入「其他」的路径回来时先恢复成独立一行。"""
+    merged = db.scalar(
+        select(PageviewMergedPath).where(
+            PageviewMergedPath.site_id == site_id,
+            PageviewMergedPath.day == day,
+            PageviewMergedPath.path == path,
+        )
+    )
+    if merged is not None:
+        _restore_merged_path(db, site_id=site_id, day=day, path=path, merged=merged)
+        return
+
     statement = sqlite_insert(PageviewPath).values(site_id=site_id, day=day, path=path, pv=1)
     db.execute(
         statement.on_conflict_do_update(
@@ -220,8 +241,54 @@ def _bump_path(db: DbSession, *, site_id: str, day: str, path: str) -> None:
     )
 
 
+def _restore_merged_path(
+    db: DbSession, *, site_id: str, day: str, path: str, merged: PageviewMergedPath
+) -> None:
+    """把「其他」里的历史次数还给这条路径，再加这一次。
+
+    不这么做的话，一条路径一旦被并入「其他」就永远回不到独立计数。
+    """
+    statement = sqlite_insert(PageviewPath).values(
+        site_id=site_id, day=day, path=path, pv=merged.pv + 1
+    )
+    db.execute(
+        statement.on_conflict_do_update(
+            index_elements=["site_id", "day", "path"],
+            set_={"pv": PageviewPath.pv + merged.pv + 1},
+        )
+    )
+    db.execute(
+        update(PageviewPath)
+        .where(
+            PageviewPath.site_id == site_id,
+            PageviewPath.day == day,
+            PageviewPath.path == PAGEVIEW_OTHER_PATH,
+        )
+        .values(pv=PageviewPath.pv - merged.pv)
+    )
+    db.execute(
+        delete(PageviewPath).where(
+            PageviewPath.site_id == site_id,
+            PageviewPath.day == day,
+            PageviewPath.path == PAGEVIEW_OTHER_PATH,
+            PageviewPath.pv <= 0,
+        )
+    )
+    db.execute(
+        delete(PageviewMergedPath).where(
+            PageviewMergedPath.site_id == site_id,
+            PageviewMergedPath.day == day,
+            PageviewMergedPath.path == path,
+        )
+    )
+
+
 def _compact_paths(db: DbSession, *, site_id: str, day: str) -> None:
-    """一天的不同路径超过上限时，留下次数最多的，其余并入「其他」。"""
+    """一天的不同路径超过上限时，留下次数最多的，其余并入「其他」。
+
+    被并掉的路径把次数记进账本；它下次出现时可以由
+    :func:`_restore_merged_path` 恢复，而不是永久沉在「其他」里。
+    """
     where = (PageviewPath.site_id == site_id, PageviewPath.day == day)
     total = db.scalar(select(func.count()).select_from(PageviewPath).where(*where)) or 0
     if total <= MAX_PAGEVIEW_PATHS:
@@ -233,15 +300,28 @@ def _compact_paths(db: DbSession, *, site_id: str, day: str) -> None:
         .order_by(PageviewPath.pv.desc(), PageviewPath.path)
         .limit(MAX_PAGEVIEW_PATHS - 1)
     ).all()
-    merged = db.scalar(
-        select(func.coalesce(func.sum(PageviewPath.pv), 0)).where(
+    overflow = db.execute(
+        select(PageviewPath.path, PageviewPath.pv).where(
             *where,
             PageviewPath.path.notin_(kept),
             PageviewPath.path != PAGEVIEW_OTHER_PATH,
         )
-    )
-    if not merged:
+    ).all()
+    if not overflow:
         return
+
+    merged_total = 0
+    for path, pv in overflow:
+        merged_total += int(pv)
+        statement = sqlite_insert(PageviewMergedPath).values(
+            site_id=site_id, day=day, path=path, pv=int(pv)
+        )
+        db.execute(
+            statement.on_conflict_do_update(
+                index_elements=["site_id", "day", "path"],
+                set_={"pv": PageviewMergedPath.pv + int(pv)},
+            )
+        )
 
     db.execute(
         delete(PageviewPath).where(
@@ -251,12 +331,12 @@ def _compact_paths(db: DbSession, *, site_id: str, day: str) -> None:
         )
     )
     statement = sqlite_insert(PageviewPath).values(
-        site_id=site_id, day=day, path=PAGEVIEW_OTHER_PATH, pv=int(merged)
+        site_id=site_id, day=day, path=PAGEVIEW_OTHER_PATH, pv=merged_total
     )
     db.execute(
         statement.on_conflict_do_update(
             index_elements=["site_id", "day", "path"],
-            set_={"pv": PageviewPath.pv + int(merged)},
+            set_={"pv": PageviewPath.pv + merged_total},
         )
     )
 

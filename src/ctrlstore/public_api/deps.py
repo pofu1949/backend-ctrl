@@ -55,7 +55,7 @@ def site_from_request(request: Request, db: DbSession = Depends(auth_deps.get_db
     scheme, _, raw = header.partition(" ")
     if scheme.lower() != "bearer" or not raw.strip():
         return None
-    resolved = tokens.resolve(db, raw.strip())
+    resolved = tokens.resolve(db, raw.strip(), ip=auth_deps.client_ip(request))
     if resolved is None:
         raise ApiError.unauthorized("站点令牌无效或已过期")
     _, subject = resolved

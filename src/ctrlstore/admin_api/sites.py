@@ -64,14 +64,24 @@ def create_token(
         if site is None:
             raise errors.ApiError.not_found(f"站点不存在：{payload.subject_key}")
         plaintext, token = service.issue_site_token(
-            db, site=site, name=payload.name, expires_at=payload.expires_at, actor=actor.user
+            db,
+            site=site,
+            name=payload.name,
+            expires_at=payload.expires_at,
+            actor=actor.user,
+            allowed_ip=payload.allowed_ip,
         )
     else:
         user = service.find_user(db, payload.subject_key)
         if user is None:
             raise errors.ApiError.not_found(f"账号不存在：{payload.subject_key}")
         plaintext, token = service.issue_user_token(
-            db, user=user, name=payload.name, expires_at=payload.expires_at, actor=actor.user
+            db,
+            user=user,
+            name=payload.name,
+            expires_at=payload.expires_at,
+            actor=actor.user,
+            allowed_ip=payload.allowed_ip,
         )
     return IssuedTokenOut(**TokenOut.of(token).model_dump(), token=plaintext)
 

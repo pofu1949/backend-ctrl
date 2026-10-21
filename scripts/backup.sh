@@ -15,6 +15,7 @@ set -euo pipefail
 
 DATA_DIR="${CTRLSTORE_DATA_DIR:-/var/lib/ctrlstore}"
 CONFIG="${CTRLSTORE_CONFIG:-/etc/ctrlstore/config.toml}"
+SECRETS="${CTRLSTORE_SECRETS_FILE:-/etc/ctrlstore/secrets.env}"
 BACKUP_ROOT="${CTRLSTORE_BACKUP_DIR:-/var/backups/ctrlstore}"
 SERVICES="${CTRLSTORE_SERVICES:-ctrlstore-api@0 ctrlstore-api@1 ctrlstore-worker}"
 CTRLSTORE_BIN="${CTRLSTORE_BIN:-ctrlstore}"
@@ -56,9 +57,10 @@ STARTED="$(date -u +%FT%TZ)"
 
 if [ -n "${SERVICES}" ]; then
     log "暂停服务：${SERVICES}"
+    # 先置位再停：即使 stop 失败，退出钩子也会尝试把已经停掉的服务拉起来。
+    RESTARTED=1
     # shellcheck disable=SC2086
     systemctl stop ${SERVICES}
-    RESTARTED=1
 fi
 
 log "WAL checkpoint"
@@ -76,6 +78,14 @@ done
 
 if [ -f "${CONFIG}" ]; then
     cp -a "${CONFIG}" "${TARGET}/config.toml"
+fi
+
+# 密钥单独备份并保持 0600：整机丢失后要能恢复出同一套会话密钥与访问统计
+# HMAC，否则同一天会被算成两批人，已有会话也全部失效。
+if [ -f "${SECRETS}" ]; then
+    install -m 0600 "${SECRETS}" "${TARGET}/secrets.env"
+else
+    log "警告：找不到密钥文件 ${SECRETS}，这份备份无法恢复登录与会话"
 fi
 
 APP_VERSION="$("${CTRLSTORE_BIN}" --version 2>/dev/null | awk '{print $2}')"

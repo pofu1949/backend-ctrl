@@ -354,4 +354,5 @@ def test_same_bytes_are_reported_as_duplicate(owner_client: TestClient) -> None:
     second = _direct(owner_client, "two.png", png, "image/png").json()
 
     assert second["id"] != first["id"]
-    assert second["duplicate_of"] == first["id"]
+    # 提示的是内容 ID（改引用用），不是上传会话 ID。
+    assert second["duplicate_of"] == first["asset_id"]

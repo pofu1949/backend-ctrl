@@ -82,7 +82,11 @@ def check_deadline(at: float) -> None:
 
 
 def check_archive(path: Path, limits: ExtractLimits = LIMITS) -> None:
-    """打开 Office 文件之前先看 ZIP 目录：条目数与解压后体积都要在上限内。"""
+    """打开 Office 文件之前先看 ZIP 目录：条目数、解压后体积与压缩比。
+
+    中央目录可以谎报 ``file_size``，所以再加一道压缩比上限；真正的兜底是
+    抽取时的硬超时（POSIX 上由 ``SIGALRM`` 打断单次库调用）。
+    """
     try:
         with zipfile.ZipFile(path) as archive:
             entries = archive.infolist()
@@ -95,5 +99,8 @@ def check_archive(path: Path, limits: ExtractLimits = LIMITS) -> None:
                 raise ExtractionFailed(
                     f"解压后体积过大：{total} 字节 > {limits.archive_bytes} 字节"
                 )
+            compressed = sum(entry.compress_size for entry in entries)
+            if compressed and total / compressed > 1000:
+                raise ExtractionFailed("压缩比异常，拒绝解压")
     except zipfile.BadZipFile as exc:
         raise ExtractionFailed("压缩包已损坏，无法读取") from exc

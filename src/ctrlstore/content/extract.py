@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import signal
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,26 +39,50 @@ class Extracted:
 
 
 def run(path: Path, *, kind: str, limits=LIMITS) -> Extracted:
-    """按类型抽取。已知的「跳过/失败」原样抛出，其他异常统一收成失败。"""
+    """按类型抽取。已知的「跳过/失败」原样抛出，其他异常统一收成失败。
+
+    除各抽取器循环里的时间检查外，Linux 上再用 ``SIGALRM`` 给单次库调用一个
+    硬上限：解析损坏文件时库可能长时间卡住，循环检查根本轮不到。
+    """
     try:
-        if kind in (KIND_MARKDOWN, KIND_TEXT):
-            return _plain(path, limits)
-        if kind == KIND_DOCX:
-            check_archive(path, limits)
-            text, truncated = docx_text.extract(path, limits)
-            return Extracted(text=text, truncated=truncated)
-        if kind == KIND_XLSX:
-            check_archive(path, limits)
-            text, truncated, preview = xlsx_preview.extract(path, limits)
-            return Extracted(text=text, truncated=truncated, table=preview)
-        if kind == KIND_PDF:
-            text, truncated, pages = pdf_text.extract(path, limits)
-            return Extracted(text=text, truncated=truncated, page_count=pages)
+        with _hard_timeout(limits.timeout_seconds):
+            if kind in (KIND_MARKDOWN, KIND_TEXT):
+                return _plain(path, limits)
+            if kind == KIND_DOCX:
+                check_archive(path, limits)
+                text, truncated = docx_text.extract(path, limits)
+                return Extracted(text=text, truncated=truncated)
+            if kind == KIND_XLSX:
+                check_archive(path, limits)
+                text, truncated, preview = xlsx_preview.extract(path, limits)
+                return Extracted(text=text, truncated=truncated, table=preview)
+            if kind == KIND_PDF:
+                text, truncated, pages = pdf_text.extract(path, limits)
+                return Extracted(text=text, truncated=truncated, page_count=pages)
     except (ExtractionFailed, ExtractionSkipped):
         raise
     except Exception as exc:  # 损坏、编码异常、库自己抛的错
         raise ExtractionFailed(f"无法读取文件：{exc}") from exc
     raise ExtractionSkipped(f"这类内容不抽取文本：{kind}")
+
+
+@contextmanager
+def _hard_timeout(seconds: float):
+    """POSIX 上用定时器打断卡住的库调用；Windows 没有 SIGALRM，退回循环检查。"""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _raise(_signum, _frame) -> None:
+        raise ExtractionFailed(f"处理超过 {int(seconds)} 秒，已停止")
+
+    previous = signal.signal(signal.SIGALRM, _raise)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _plain(path: Path, limits) -> Extracted:

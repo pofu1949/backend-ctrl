@@ -120,6 +120,8 @@ class ApiToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     subject_type: Mapped[str] = mapped_column(String(16))
     subject_id: Mapped[str] = mapped_column(String(36))
+    #: 允许的来源 IP，可逗号分隔多个；空表示不限制。用于站点/命令行令牌收紧来源。
+    allowed_ip: Mapped[str | None] = mapped_column(String(128))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -294,7 +296,7 @@ DERIVATIVE_READY = "ready"
 DERIVATIVE_FAILED = "failed"
 DERIVATIVE_SKIPPED = "skipped"
 
-#: 派生用途。本部分只生成 thumb；display 与 poster 留好任务类型。
+#: 派生用途：缩略图、展示图、视频/PDF 封面、Excel 预览。
 PURPOSE_THUMB = "thumb"
 PURPOSE_DISPLAY = "display"
 PURPOSE_POSTER = "poster"
@@ -691,6 +693,24 @@ class PageviewPath(Base):
 
     __tablename__ = "pageview_paths"
     __table_args__ = (Index("ix_pageview_paths_day", "day"),)
+
+    site_id: Mapped[str] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    path: Mapped[str] = mapped_column(String(512), primary_key=True)
+    pv: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PageviewMergedPath(Base):
+    """被并入「其他」的路径及其次数账本。
+
+    保留这份账本是为了让路径回来时能恢复成独立一行，而不是永远沉在「其他」里。
+    它和 ``pageview_paths`` 一样只保留 400 天。
+    """
+
+    __tablename__ = "pageview_merged_paths"
+    __table_args__ = (Index("ix_pageview_merged_paths_day", "day"),)
 
     site_id: Mapped[str] = mapped_column(
         ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True

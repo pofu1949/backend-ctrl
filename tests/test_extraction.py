@@ -321,3 +321,15 @@ def test_archive_entry_limit(tmp_path) -> None:
 
     with pytest.raises(ExtractionFailed):
         check_archive(path, ExtractLimits(archive_entries=2))
+
+
+def test_archive_compression_ratio_guard(tmp_path) -> None:
+    """中央目录可以谎报大小；压缩比异常时直接拒绝。"""
+    import zipfile
+
+    path = tmp_path / "ratio.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"0" * 2_000_000)
+
+    with pytest.raises(ExtractionFailed):
+        check_archive(path)

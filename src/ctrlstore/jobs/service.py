@@ -161,6 +161,23 @@ def fail(db: DbSession, job_id: str, error: BaseException | str) -> str:
     return job.status
 
 
+def defer(db: DbSession, job_id: str) -> None:
+    """把任务退回待处理，且不消耗尝试次数。
+
+    用于「现在资源不足，稍后再做」：内存低于阈值时解码任务不开始执行。
+    退回后 worker 会等下一次轮询再试，不会记成失败。
+    """
+    job = db.get(Job, job_id)
+    if job is None:
+        return
+    job.status = JOB_PENDING
+    job.lease_until = None
+    # 领取时加过 1；这里退回来，保证重试次数只统计真正执行过的尝试。
+    job.attempts = max(job.attempts - 1, 0)
+    job.updated_at = utcnow()
+    db.commit()
+
+
 def list_jobs(db: DbSession, *, status: str | None = None, limit: int = 50) -> list[Job]:
     """按创建时间倒序列出任务，供 ``ctrlstore jobs list`` 与后续管理端使用。"""
     statement = select(Job).order_by(Job.created_at.desc(), Job.id)

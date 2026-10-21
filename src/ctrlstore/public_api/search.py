@@ -36,7 +36,7 @@ def search_public(
     if site is None:
         raise ApiError.unauthorized("站点搜索需要站点令牌")
 
-    mode, assets = search.published(db, query=q, limit=limit)
+    mode, assets = search.published(db, query=q, site_id=site.id, limit=limit)
     items = [
         payloads.asset_summary(request, asset, site=site)
         for asset in assets

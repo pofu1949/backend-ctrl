@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session as DbSession
 
 from .. import audit
 from ..errors import ApiError
-from ..models import Tag, User, utcnow
+from ..models import Asset, AssetTag, Tag, User, utcnow
+from ..search import service as search
 
 #: 标签名长度上限，与列宽一致。
 MAX_NAME_LENGTH = 64
@@ -73,6 +74,47 @@ def ensure_tags(db: DbSession, names: Iterable[str], *, actor: User | None = Non
             continue
         seen[clean] = ensure_tag(db, clean, actor=actor)
     return list(seen.values())
+
+
+def merge_tags(db: DbSession, *, source: Tag, target: Tag, actor: User) -> Tag:
+    """把所有用 ``source`` 的内容改挂到 ``target``，然后删除 ``source``。
+
+    名称本身已经唯一，重名来自「两个不同写法指同一件事」。合并后重建受影响
+    内容的检索索引：关键词列里存的是标签名，不重建会留着旧名字。
+    """
+    if source.id == target.id:
+        raise ApiError.invalid("不能把标签合并到它自己")
+
+    rows = list(db.scalars(select(AssetTag).where(AssetTag.tag_id == source.id)).all())
+    asset_ids = {row.asset_id for row in rows}
+    for row in rows:
+        duplicate = db.scalar(
+            select(AssetTag.id).where(
+                AssetTag.asset_id == row.asset_id, AssetTag.tag_id == target.id
+            )
+        )
+        if duplicate is not None:
+            db.delete(row)
+        else:
+            row.tag_id = target.id
+    source_name = source.name
+    db.delete(source)
+    db.flush()
+
+    for asset_id in asset_ids:
+        asset = db.get(Asset, asset_id)
+        if asset is not None:
+            search.refresh(db, asset)
+
+    audit.record_for_user(
+        db,
+        actor,
+        action=audit.TAG_MERGED,
+        target_type=audit.TARGET_TAG,
+        target_id=target.id,
+        detail={"merged_tag": source.id, "merged_name": source_name, "assets": len(asset_ids)},
+    )
+    return target
 
 
 def slugify(name: str) -> str:

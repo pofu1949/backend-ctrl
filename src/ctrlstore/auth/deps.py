@@ -162,7 +162,7 @@ def _from_token(request: Request, db: DbSession) -> Principal | None:
     scheme, _, raw = header.partition(" ")
     if scheme.lower() != "bearer" or not raw.strip():
         return None
-    resolved = tokens.resolve(db, raw.strip())
+    resolved = tokens.resolve(db, raw.strip(), ip=client_ip(request))
     if resolved is None:
         return None
     _, subject = resolved

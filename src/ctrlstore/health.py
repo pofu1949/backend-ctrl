@@ -106,6 +106,11 @@ def disk_usage(path: Path) -> tuple[int, int] | None:
     return None
 
 
+def has_available_memory(settings: Settings) -> bool:
+    """可用内存是否够新工作。低于阈值时拒绝上传与解码任务（企划第 17.2 节）。"""
+    return psutil.virtual_memory().available >= settings.min_available_memory_bytes
+
+
 def admin_report(db: DbSession, settings: Settings) -> dict:
     """所有者健康接口（企划第 9 部分）。
 

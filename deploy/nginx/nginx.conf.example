@@ -1,0 +1,26 @@
+# CtrlStore 的 Nginx 主配置示例（企划第 17.2 节）。
+#
+# 放在 /etc/nginx/nginx.conf（或 include 到主配置里）。站点片段见同目录的
+# ctrlstore.conf.example；这份只负责全局进程数与连接数，不放在 sites-available 里。
+#
+# 2 核机器上固定两个 worker：不为每个核再开一份，内存留给 API 与 worker。
+
+user www-data;
+worker_processes 2;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log warn;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    server_tokens off;
+
+    include /etc/nginx/sites-enabled/*;
+}

@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     user_quota_bytes: int = 0
     #: 全库字节配额。口径同上。
     library_quota_bytes: int = 0
+    #: 单个账号的内容条数配额（未彻底删除的都算，含回收站）。
+    user_quota_items: int = 0
+    #: 全库内容条数配额。
+    library_quota_items: int = 0
 
     # —— 运维（第 9 部分）——
     #: 备份根目录。所有者健康接口读这里最新的成功清单；脚本默认 /var/backups/ctrlstore。
@@ -204,7 +208,12 @@ class Settings(BaseSettings):
             raise ValueError("必须是正整数")
         return value
 
-    @field_validator("user_quota_bytes", "library_quota_bytes")
+    @field_validator(
+        "user_quota_bytes",
+        "library_quota_bytes",
+        "user_quota_items",
+        "library_quota_items",
+    )
     @classmethod
     def _non_negative_int(cls, value: int) -> int:
         if value < 0:
