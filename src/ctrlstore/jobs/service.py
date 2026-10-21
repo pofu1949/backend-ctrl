@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -31,9 +32,9 @@ from ..models import (
     utcnow,
 )
 
-#: 任务类型。处理器按同一批字符串注册，新增类型只改这里和 handlers。
+#: 任务类型。新增解码类型时也要加入 MEMORY_REQUIRED_KINDS，并在 handlers 注册。
 KIND_THUMB = "image.thumb"
-#: 展示图：第 7 部分只留任务类型，默认不入队。
+#: 展示图：1600 像素的可选预览，与缩略图一起入队，不阻塞原图发布。
 KIND_DISPLAY = "image.display"
 #: 文本抽取与表格预览（第 9 部分）。
 KIND_EXTRACT = "content.extract"
@@ -43,6 +44,9 @@ KIND_VIDEO = "video.inspect"
 KIND_PUBLISH_DUE = "publish.due"
 #: 每小时一次：过期上传、回收站到期、旧任务记录。
 KIND_CLEANUP = "maintenance.cleanup"
+
+#: 领取前筛选与执行前复查共用此分类；发布与清理不受解码内存阈值限制。
+MEMORY_REQUIRED_KINDS = frozenset({KIND_THUMB, KIND_DISPLAY, KIND_EXTRACT, KIND_VIDEO})
 
 #: 租约时长与重试上限（企划第 10.3 节）。
 LEASE_MINUTES = 15
@@ -95,24 +99,27 @@ def enqueue_periodic(
     return enqueue(db, kind, payload)
 
 
-def claim(engine: Engine) -> str | None:
+def claim(engine: Engine, *, excluded_kinds: Collection[str] = ()) -> str | None:
     """领取一个任务，返回任务 ID；没有可领的返回 ``None``。
 
-    顺序是「回收过期租约 → 取出最早的一条 → 标记为处理中」，全在一个
+    顺序是「回收过期租约 → 取出最早的可执行任务 → 标记为处理中」，全在一个
     写事务里。用 ``BEGIN IMMEDIATE`` 而不是默认的延迟事务，是为了在这一步
     就拿到写锁：否则两个进程可以同时读到同一行 ``pending``。
+
+    ``excluded_kinds`` 只过滤本次领取，不改待处理任务的顺序、次数或时间。
+    资源恢复后省略过滤，即可继续按 ``created_at, id`` 领取；租约回收仍覆盖所有类型。
     """
+    candidate = select(Job.id).where(Job.status == JOB_PENDING)
+    if excluded_kinds:
+        candidate = candidate.where(Job.kind.not_in(excluded_kinds))
+    candidate = candidate.order_by(Job.created_at, Job.id).limit(1)
+
     now = utcnow()
     with engine.connect() as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         try:
             _reclaim_expired(connection, now=now)
-            job_id = connection.execute(
-                select(Job.id)
-                .where(Job.status == JOB_PENDING)
-                .order_by(Job.created_at, Job.id)
-                .limit(1)
-            ).scalar()
+            job_id = connection.execute(candidate).scalar()
             if job_id is None:
                 connection.exec_driver_sql("COMMIT")
                 return None
@@ -164,8 +171,8 @@ def fail(db: DbSession, job_id: str, error: BaseException | str) -> str:
 def defer(db: DbSession, job_id: str) -> None:
     """把任务退回待处理，且不消耗尝试次数。
 
-    用于「现在资源不足，稍后再做」：内存低于阈值时解码任务不开始执行。
-    退回后 worker 会等下一次轮询再试，不会记成失败。
+    用于领取后资源才变得不足的情况：解码任务不开始执行，也不记成失败。
+    worker 随后排除解码类型，继续尝试发布和清理，不让这条任务堵住队首。
     """
     job = db.get(Job, job_id)
     if job is None:

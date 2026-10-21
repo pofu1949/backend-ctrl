@@ -53,6 +53,49 @@ def test_claim_returns_none_when_queue_is_empty(engine) -> None:
     assert jobs.claim(engine) is None
 
 
+def test_claim_excludes_kinds_without_changing_fifo(db: DbSession, engine) -> None:
+    decode = _enqueue(db)
+    decode.attempts = 2
+    decode.last_error = "上次执行失败"
+    original_times = (decode.created_at, decode.updated_at)
+    first = _enqueue(db, jobs.KIND_PUBLISH_DUE)
+    second = _enqueue(db, jobs.KIND_CLEANUP)
+    # 同一时间入队时仍按 ID 排；过滤不能改变原有 FIFO 规则。
+    second.created_at = first.created_at
+    db.commit()
+
+    for expected in sorted((first.id, second.id)):
+        assert jobs.claim(engine, excluded_kinds=(jobs.KIND_THUMB,)) == expected
+    assert jobs.claim(engine, excluded_kinds=(jobs.KIND_THUMB,)) is None
+
+    db.expire_all()
+    assert decode.status == JOB_PENDING
+    assert decode.attempts == 2
+    assert decode.last_error == "上次执行失败"
+    assert decode.lease_until is None
+    assert (decode.created_at, decode.updated_at) == original_times
+    assert jobs.claim(engine) == decode.id
+    db.expire_all()
+    assert decode.attempts == 3
+
+
+@pytest.mark.parametrize("attempts", [1, jobs.MAX_ATTEMPTS])
+def test_excluded_kind_still_reclaims_expired_lease(db: DbSession, engine, attempts) -> None:
+    """低内存只阻止新执行，不屏蔽已中断任务的租约回收和重试上限。"""
+    decode = _enqueue(db)
+    decode.status = JOB_RUNNING
+    decode.attempts = attempts
+    decode.lease_until = utcnow() - timedelta(seconds=1)
+    due = _enqueue(db, jobs.KIND_PUBLISH_DUE)
+
+    assert jobs.claim(engine, excluded_kinds=(jobs.KIND_THUMB,)) == due.id
+
+    db.expire_all()
+    assert decode.status == (JOB_FAILED if attempts == jobs.MAX_ATTEMPTS else JOB_PENDING)
+    assert decode.attempts == attempts
+    assert decode.lease_until is None
+
+
 def test_expired_lease_is_claimable_again(db: DbSession, engine) -> None:
     """worker 中途被杀：租约到期后任务回到可领，次数继续累加。"""
     job = _enqueue(db)

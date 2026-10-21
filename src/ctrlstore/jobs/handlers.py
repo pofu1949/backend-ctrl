@@ -75,7 +75,7 @@ class JobDeferred(Exception):
 def _ensure_memory(settings: Settings) -> None:
     """解码类任务开始前查一次可用内存（企划第 17.2 节）。
 
-    上传在 API 侧也会拒绝；这里挡住已经在队列里、但内存变低时才轮到的任务。
+    worker 领取前已筛选一次；这里兜住领取后、真正执行前内存才变低的情况。
     """
     if not has_available_memory(settings):
         raise JobDeferred("可用内存不足，稍后再试")
@@ -86,6 +86,8 @@ def run(*, settings: Settings, storage: LocalStorage, db: DbSession, job) -> Non
     handler = _HANDLERS.get(job.kind)
     if handler is None:
         raise JobError(f"未知任务类型：{job.kind}")
+    if job.kind in jobs.MEMORY_REQUIRED_KINDS:
+        _ensure_memory(settings)
     handler(settings=settings, storage=storage, db=db, payload=job.data)
 
 
@@ -94,7 +96,6 @@ def run(*, settings: Settings, storage: LocalStorage, db: DbSession, job) -> Non
 
 def _image_derivative(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """生成一份图片派生文件，成功后就绪并尝试补进公开区。"""
-    _ensure_memory(settings)
     derivative = db.get(Derivative, str(payload.get("derivative_id", "")))
     if derivative is None:
         # 版本已被保留规则淘汰，任务自然作废；这不是错误。
@@ -132,7 +133,6 @@ def _image_derivative(*, settings: Settings, storage: LocalStorage, db: DbSessio
 
 def _content_extract(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """抽取一个版本的文本；xlsx 另存预览 JSON，PDF 另存首页图。"""
-    _ensure_memory(settings)
     version = _version(db, payload)
     if version is None:
         return
@@ -223,7 +223,6 @@ def _store_preview(
 
 def _video_inspect(*, settings: Settings, storage: LocalStorage, db: DbSession, payload) -> None:
     """探测编码并尝试截封面。没有 ffprobe/ffmpeg 就跳过，不影响播放原片。"""
-    _ensure_memory(settings)
     version = _version(db, payload)
     if version is None:
         return
