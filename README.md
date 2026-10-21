@@ -130,6 +130,8 @@ ctrlstore token list
 ctrlstore token revoke <令牌 ID>
 
 ctrlstore import <本地路径> [--asset-id <ID>]   # 从服务器路径导入；带 ID 则作为新版本
+ctrlstore worker [--once]                   # 后台任务：缩略图、定时发布、到期清理
+ctrlstore jobs list [--status failed]       # 任务与最近一次错误
 ctrlstore fsck [--fix-public-links] [--skip-hashes]   # 一致性检查
 ```
 
@@ -178,7 +180,7 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | POST | `/api/admin/v1/assets` | `asset.upload`；直接创建 Markdown / 纯文本 |
 | GET | `/api/admin/v1/assets/{id}` | `asset.read`；含全部保留版本 |
 | PATCH | `/api/admin/v1/assets/{id}` | `asset.update`；改元数据、标签或正文，必须带 `revision` |
-| POST | `/api/admin/v1/assets/{id}/publish` | `asset.publish`；发布当前版本 |
+| POST | `/api/admin/v1/assets/{id}/publish` | `asset.publish`；立即发布，或带 `publish_at` 定时 |
 | POST | `/api/admin/v1/assets/{id}/unpublish` | `asset.publish`；撤回，公开地址立即 404 |
 | POST | `/api/admin/v1/assets/{id}/archive` | `asset.publish`；归档 |
 | POST | `/api/admin/v1/assets/{id}/trash` | `asset.trash`；进回收站 |
@@ -364,10 +366,14 @@ Markdown 与纯文本可以不经上传直接创建，也可以直接改正文�
 ```text
 public/<asset_id>/original.png          当前发布版（硬链接，地址 /p/<id>/original.png）
 public/<asset_id>/v/<n>/original.png    同一版本（地址 /p/<id>/v/<n>/original.png，可长期缓存）
+public/<asset_id>/thumb.webp            已就绪的缩略图（地址 /p/<id>/thumb.webp）
 ```
 
+缩略图只有在该版本已就绪时才出现；没有的文件不会在公开 JSON 里给地址。
+派生文件的挂载规则见「后台任务与派生」一节。
+
 扩展名随该版本的**真实类型**变化：换过文件类型之后，旧扩展名的地址必须消失，
-所以每次发布都会先清空该内容在 `public/` 下的目录，再重建两个链接。
+所以每次发布都会先清空该内容在 `public/` 下的目录，再重建应有的链接（原图 + 已就绪的派生）。
 同盘用硬链接；原件区与公开区不在同一块盘时退化为复制，健康检查会标 `degraded`
 （`public_not_same_filesystem`）。
 
@@ -527,6 +533,79 @@ POST /api/admin/v1/sites/{id}/grants  {"prefix": "home", "can_read_unlisted": fa
 它和文章用同一套字段（`body.format` + `body.html`），网站不需要为公告写第二种渲染分支；
 需要原文时用 `?format=markdown` 取纯文本（字段名沿用既有约定，内容就是原文）。
 
+## 后台任务与派生
+
+一个 worker 进程从 `jobs` 表领取任务，同时只做一件事。它与 API 分进程运行，
+缩略图卡住时不会挡住登录与发布；启动方式是独立的 `ctrlstore worker`（systemd 单元在第 9 部分给出）。
+
+### 队列
+
+* 领取用 `BEGIN IMMEDIATE`：取出 `pending` 并改成 `running` 在同一事务里。即使误起了两个
+  worker，也只有一个能领到同一行。
+* 租约 15 分钟、最多 3 次。worker 中途被杀时，租约过期后任务可以再领；领满 3 次仍失败就停在
+  `failed`，不无限重启。
+* 失败只写 `jobs.last_error`，不改已提交的业务结果。`ctrlstore jobs list --status failed` 是所有者
+  查看它们的地方。
+* 周期任务也是普通任务：`publish.due` 每分钟、`maintenance.cleanup` 每小时各补一条；同类已有
+  待处理或处理中的就不重复补，空转不会把队列堆满。
+
+| 类型 | 作用 |
+| --- | --- |
+| `image.thumb` | 缩略图：最长边 480 的 WebP |
+| `image.display` | 展示图：最长边 1600 的 WebP。任务类型已留好，默认不入队（企划第 8.5 节 D2） |
+| `publish.due` | 把到点的定时发布送出去 |
+| `maintenance.cleanup` | 过期上传、回收站到期、旧任务记录 |
+
+### 缩略图
+
+图片入库（含替换）后立刻登记一条 `pending` 的派生记录并排任务；发布**不等**它完成。
+派生文件写在 `derivatives/aa/<id>/vN/thumb.webp`，公开地址固定为 `/p/{id}/thumb.webp`。
+生成失败只把这条记录标成 `failed`：原图照常发布，响应里没有 `thumb` 字段。
+
+公开区只补**已经应该在 `/p/` 的那一版**：已发布、可见性为公开或未列出、且版本就是
+`published_version_id`。仅站点、私有、草稿与待发布的替换都不挂缩略图。
+
+* 发布时缩略图已就绪：随原图一起挂出；
+* 还没就绪：公开响应先只给 `urls.original`，worker 完成后再补 `urls.thumb`；
+* 撤回、归档、改为私有或进回收站：整个目录（含缩略图）一起摘掉。
+
+派生文件不 `ready` 就不给 URL；响应里每一条公开地址在返回前都会确认文件确实存在，
+不会给出一个必然 404 的地址。
+
+### 定时发布
+
+`POST /api/admin/v1/assets/{id}/publish` 带未来的 `publish_at` 时只登记计划：不写快照、
+不进公开区。到点后由 `publish.due` 按第 5 部分的同一顺序执行——先提交快照，再按可见性挂链接。
+
+发不出去（例如正文引用了未发布图片）会取消定时并写 `asset_publish_failed` 审计，
+不会每分钟重试一次。手动发布、撤回、归档、进回收站都会一并取消定时。
+
+### 保留与清理
+
+* 图片与文档留最近 5 个版本，视频留待发布版与已发布版（`version_retention` /
+  `video_version_retention`）。两个指针占用的版本不计入上限。淘汰版本时它的派生目录一起删。
+* 回收站默认保留 30 天（`trash_retention_days`），到期由 `maintenance.cleanup` 彻底删除；
+  仍被封面或集合引用时跳过，等所有者先解除引用。
+* 超过 24 小时未完成的上传会话、过旧的已完成任务记录也在同一个任务里清理。
+
+### 验收
+
+```bash
+ctrlstore import ./hero.png          # 图片入库：自动排缩略图，内容仍是草稿
+ctrlstore worker --once              # 生成 480 像素 WebP，派生状态变 ready
+ctrlstore jobs list                  # 应看到 image.thumb 为 done
+
+# 在管理接口把可见性设为 public 再发布（见「接口」一节），然后读公开 JSON
+curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>
+# urls 同时有 original 与 thumb；浏览器打开 <public_base_url>/p/<内容 ID>/thumb.webp
+# 得到最长边 480 的 WebP，原图地址仍是上传时的原清晰度文件
+
+# 如果先发布、后跑 worker，链接会在 worker 完成时补上：
+curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 这时只有 original
+ctrlstore worker --once
+curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 多了 thumb
+```
+
 ## 数据库
 
 SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON`、`synchronous=NORMAL`、
@@ -538,7 +617,7 @@ SQLite，单文件，`journal_mode=WAL`、`busy_timeout=5000`、`foreign_keys=ON
 
 表结构见 [models.py](src/ctrlstore/models.py)，迁移在 [alembic/versions](alembic/versions)：
 `0001` 基线，`0002` 身份与会话，`0003` 上传与幂等键，`0004` 目录、标签、内容与版本，
-`0005` 集合与站点授权，`0006` 发布快照补别名与图片引用。
+`0005` 集合与站点授权，`0006` 发布快照补别名与图片引用，`0007` 后台任务、派生文件与定时发布。
 「至多一个所有者」「同一父目录下不重名」「同一内容版本号唯一」「同一集合内同一内容只出现一次、
 位置唯一」「已发布别名唯一」都由库层约束兜底，不只靠应用代码。
 时间一律按 UTC 存不带时区的值。
@@ -558,5 +637,6 @@ JSON 行输出到 stdout，由 systemd 收进 journald。`log.py` 会丢弃命�
 异常只保留类型与消息。日志里不写文件正文。
 
 审计写在 `audit_logs`：登录成功与失败、退出、建账号、权限变更、停用、改密码、建站点、签发与撤销令牌，
-上传的开始、完成、取消与失败，以及建目录、改名、移动、建标签、内容登记、元数据修改、版本追加与淘汰。
+上传的开始、完成、取消与失败，建目录、改名、移动、建标签、内容登记、元数据修改、版本追加与淘汰，
+以及发布、撤回、归档、回收站、定时发布登记与定时发布失败。
 登录失败的记录里只有用户名和 IP，不记密码；上传与内容记录里只有类型、字节数与哈希，不记文件正文。

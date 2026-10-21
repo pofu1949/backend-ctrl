@@ -165,6 +165,12 @@ UPLOAD_EXPIRED = "expired"
 #: 已经占住临时目录、还没结束的状态。并发会话上限只数这些。
 UPLOAD_OPEN_STATUSES = (UPLOAD_CREATED, UPLOAD_RECEIVING, UPLOAD_MERGING)
 
+# —— 后台任务状态（企划第 10.3 节）——
+JOB_PENDING = "pending"
+JOB_RUNNING = "running"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+
 
 class UploadSession(Base):
     """一次上传。分片与直传共用，完成后留下足以登记内容的信息。
@@ -213,6 +219,42 @@ class UploadSession(Base):
         return self.status in UPLOAD_OPEN_STATUSES
 
 
+class Job(Base):
+    """后台任务（企划第 10.3 节）。
+
+    只有一个 worker 进程按 ``created_at`` 顺序领取，租约 15 分钟、最多 3 次。
+    领取用 ``BEGIN IMMEDIATE``：同一时刻只有一个进程能把 ``pending`` 改成 ``running``。
+
+    这里只存任务本身；做得好不好由业务表体现——缩略图的状态在 ``derivatives``，
+    发布的状态在 ``assets``。任务失败重试不会改变这两处已经提交的结果。
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_status_created", "status", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    #: 处理这件事需要的参数，JSON 文本。形状由 ``kind`` 决定。
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default=JOB_PENDING)
+    #: 已经领过几次。领取时加 1，达到上限就停在 ``failed`` 等人查看。
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    #: 租约到期时间。到期仍是 ``running``，说明 worker 中途退出，可以再领。
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    @property
+    def data(self) -> dict:
+        """解析后的参数。坏数据按空参数处理：任务自己会因为缺参数而失败。"""
+        try:
+            value = json.loads(self.payload or "{}")
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+
 class IdempotencyKey(Base):
     """幂等键：同一身份、方法、路径、键，24 小时内返回第一次的结果。"""
 
@@ -245,6 +287,24 @@ VISIBILITY_SITE = "site"
 VISIBILITY_UNLISTED = "unlisted"
 VISIBILITY_PUBLIC = "public"
 VISIBILITIES = (VISIBILITY_PRIVATE, VISIBILITY_SITE, VISIBILITY_UNLISTED, VISIBILITY_PUBLIC)
+
+# —— 派生文件（企划第 10.2 节）——
+DERIVATIVE_PENDING = "pending"
+DERIVATIVE_READY = "ready"
+DERIVATIVE_FAILED = "failed"
+DERIVATIVE_SKIPPED = "skipped"
+
+#: 派生用途。本部分只生成 thumb；display 与 poster 留好任务类型。
+PURPOSE_THUMB = "thumb"
+PURPOSE_DISPLAY = "display"
+PURPOSE_POSTER = "poster"
+
+#: 派生文件的用途 → 公开区里的文件名。扩展名随用途固定，不随原件变化。
+DERIVATIVE_FILENAMES = {
+    PURPOSE_THUMB: "thumb.webp",
+    PURPOSE_DISPLAY: "display.webp",
+    PURPOSE_POSTER: "poster.jpg",
+}
 
 #: 抽取状态。第 4 部分只用到 pending；第 9 部分填 ready/failed/skipped。
 EXTRACT_PENDING = "pending"
@@ -321,6 +381,7 @@ class Asset(Base):
     __table_args__ = (
         Index("ix_assets_created", "created_at", "id"),
         Index("ix_assets_kind_status", "kind", "status"),
+        Index("ix_assets_publish_at", "publish_at"),
         # 已发布的别名全局唯一：撤回会清空该列，所以部分索引即可。
         Index(
             "ux_assets_published_slug",
@@ -370,6 +431,9 @@ class Asset(Base):
 
     #: 乐观锁：每次写入加 1，请求里的值不一致就 409。
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    #: 定时发布：到这个时间之后，worker 把内容按当时的字段发布出去（第 7 部分）。
+    #: 立即发布时清空；撤回、归档、进回收站一并取消。
+    publish_at: Mapped[datetime | None] = mapped_column(DateTime)
     published_at: Mapped[datetime | None] = mapped_column(DateTime)
     trashed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
@@ -417,6 +481,46 @@ class AssetVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     asset: Mapped[Asset] = relationship(back_populates="versions")
+    derivatives: Mapped[list[Derivative]] = relationship(
+        back_populates="version",
+        cascade="all, delete-orphan",
+        order_by="Derivative.purpose",
+        lazy="selectin",
+    )
+
+
+class Derivative(Base):
+    """由某个版本生成的文件：缩略图、展示图、视频封面（企划第 10.2 节）。
+
+    派生文件不是公开文件本身：只有它 ``ready``、且所属版本正处在公开区时，
+    ``public/`` 下才会出现对应链接。生成失败只影响这一行，不撤回原图。
+    """
+
+    __tablename__ = "derivatives"
+    __table_args__ = (UniqueConstraint("version_id", "purpose", name="ux_derivative_purpose"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))
+    mime: Mapped[str] = mapped_column(String(128))
+    #: 相对 ``derivatives/`` 的键，例如 ``aa/<id>/v1/thumb.webp``。
+    storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default=DERIVATIVE_PENDING)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    version: Mapped[AssetVersion] = relationship(back_populates="derivatives")
+
+    @property
+    def filename(self) -> str:
+        """公开区里的文件名。用途决定扩展名，不跟着原件走。"""
+        return DERIVATIVE_FILENAMES[self.purpose]
+
+    @property
+    def is_ready(self) -> bool:
+        return self.status == DERIVATIVE_READY
 
 
 class AssetTag(Base):

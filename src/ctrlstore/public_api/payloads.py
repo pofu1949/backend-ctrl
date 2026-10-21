@@ -15,9 +15,12 @@ from typing import Any
 
 from fastapi import Request
 
-from ..assets import publish, signing
+from ..assets import derivatives, publish, signing
 from ..content import markdown_render
 from ..models import (
+    PURPOSE_DISPLAY,
+    PURPOSE_POSTER,
+    PURPOSE_THUMB,
     VISIBILITY_SITE,
     Asset,
     AssetVersion,
@@ -25,13 +28,36 @@ from ..models import (
     CollectionItem,
     utcnow,
 )
+from ..storage import LocalStorage
 from .deps import absolute_url
+
+#: 公开 JSON 里会给出地址的派生文件。视频封面在第 9 部分才会生成。
+PUBLIC_DERIVATIVE_PURPOSES = (PURPOSE_THUMB, PURPOSE_DISPLAY, PURPOSE_POSTER)
 
 
 def original_url(request: Request, asset: Asset, version: AssetVersion) -> str:
     """原图 / 原件的公开地址。扩展名取该版本的真实类型。"""
     extension = version.storage_key.rsplit(".", 1)[-1]
     return absolute_url(request, f"/p/{asset.id}/original.{extension}")
+
+
+def derivative_urls(request: Request, asset: Asset, version: AssetVersion) -> dict[str, str]:
+    """已就绪、且确实挂在公开区的派生地址。
+
+    只对会进 ``/p/`` 的内容调用；「仅站点」永远走签名地址，不给缩略图路径。
+    文件不存在时不返回这个字段——宁可少给，也不给一个必然 404 的地址。
+    """
+    storage = LocalStorage.from_settings(request.app.state.settings)
+    urls: dict[str, str] = {}
+    for derivative in derivatives.ready(version):
+        if derivative.purpose not in PUBLIC_DERIVATIVE_PURPOSES:
+            continue
+        if not storage.public_derivative_path(asset.id, derivative.purpose).is_file():
+            continue
+        urls[derivative.purpose] = absolute_url(
+            request, f"/p/{asset.id}/{derivative.filename}"
+        )
+    return urls
 
 
 def signed_url(request: Request, asset: Asset, version: AssetVersion) -> str:
@@ -58,7 +84,9 @@ def file_urls(request: Request, asset: Asset, *, site) -> dict[str, str]:
     if version is None:
         return {}
     if publish.desired_links(asset) is not None:
-        return {"original": original_url(request, asset, version)}
+        urls = {"original": original_url(request, asset, version)}
+        urls.update(derivative_urls(request, asset, version))
+        return urls
     if site is not None and asset.visibility == VISIBILITY_SITE:
         return {"signed": signed_url(request, asset, version)}
     return {}

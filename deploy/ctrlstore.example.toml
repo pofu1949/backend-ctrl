@@ -47,6 +47,17 @@ pdf = 104857600         # 100 MB
 docx = 52428800         # 50 MB
 xlsx = 52428800         # 50 MB
 
+# —— 版本保留、回收站与派生 ——
+# 图片与文档保留最近 5 个版本；视频只留待发布版与已发布版。
+# 两个指针占用的版本不计入上限，永远不会被这条规则删掉。
+version_retention = 5
+video_version_retention = 2
+# 回收站保留天数。到期由 worker 彻底删除；仍被封面或集合引用时会跳过。
+trash_retention_days = 30
+# 缩略图最长边。展示图（1600）属于后续增强，第 7 部分只留任务类型。
+thumb_max_side = 480
+display_max_side = 1600
+
 # —— 进程 ——
 log_level = "INFO"
 api_host = "127.0.0.1"

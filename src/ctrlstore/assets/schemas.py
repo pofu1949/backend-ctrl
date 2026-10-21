@@ -22,6 +22,17 @@ class TagRefOut(BaseModel):
     slug: str
 
 
+class DerivativeOut(BaseModel):
+    """派生文件的状态。公开地址不在这里：它取决于发布状态，由发布模块给。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    purpose: str
+    mime: str
+    status: str
+    updated_at: datetime
+
+
 class VersionOut(BaseModel):
     """一个版本。``storage_key`` 只给管理员看，公开接口不会出现。"""
 
@@ -38,6 +49,8 @@ class VersionOut(BaseModel):
     height: int | None = None
     extract_status: str
     playback: str | None = None
+    #: 已登记的全部派生文件；``status`` 为 pending / ready / failed。
+    derivatives: list[DerivativeOut] = Field(default_factory=list)
     created_at: datetime
 
     @classmethod
@@ -64,6 +77,8 @@ class AssetOut(BaseModel):
     published_version_id: str | None = None
     #: 线上别名。编辑中的 ``slug`` 改了也要发布才生效。
     published_slug: str | None = None
+    #: 定时发布的时间。到点前不写快照，也不进公开区。
+    publish_at: datetime | None = None
     tags: list[TagRefOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -87,6 +102,7 @@ class AssetOut(BaseModel):
             current_version=VersionOut.of(current) if current else None,
             published_version_id=asset.published_version_id,
             published_slug=asset.published_slug,
+            publish_at=asset.publish_at,
             tags=[TagRefOut.model_validate(tag) for tag in asset.tags],
             created_at=asset.created_at,
             updated_at=asset.updated_at,
@@ -115,9 +131,14 @@ class AssetListOut(BaseModel):
 
 
 class VersionActionRequest(BaseModel):
-    """发布、撤回、归档、回收站、恢复都按 ``revision`` 串行（企划第 8.6 节）。"""
+    """发布、撤回、归档、回收站、恢复都按 ``revision`` 串行（企划第 8.6 节）。
+
+    ``publish_at`` 只对发布有意义：给了未来时间就是定时发布，到点前不进公开区；
+    留空或给已过去的时间都按立即发布处理。
+    """
 
     revision: int = Field(ge=1)
+    publish_at: datetime | None = Field(default=None, description="定时发布时间（ISO 8601）")
 
 
 class SignedUrlOut(BaseModel):

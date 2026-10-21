@@ -72,6 +72,7 @@ class LocalStorage:
     """数据目录上的读写。无状态，可随请求创建。"""
 
     originals_dir: Path
+    derivatives_dir: Path
     tmp_dir: Path
     public_dir: Path
 
@@ -79,11 +80,13 @@ class LocalStorage:
     def from_settings(cls, settings: Settings) -> LocalStorage:
         assert (
             settings.originals_dir is not None
+            and settings.derivatives_dir is not None
             and settings.tmp_dir is not None
             and settings.public_dir is not None
         )
         return cls(
             originals_dir=settings.originals_dir,
+            derivatives_dir=settings.derivatives_dir,
             tmp_dir=settings.tmp_dir,
             public_dir=settings.public_dir,
         )
@@ -93,6 +96,16 @@ class LocalStorage:
     def original_path(self, key: str) -> Path:
         """键到原件路径。先校验键，再拼目录，避免出现越界写入。"""
         return self.originals_dir / keys.validate(key)
+
+    def derivative_path(self, key: str) -> Path:
+        """派生键到文件路径。与原件一样，键先校验再拼。"""
+        return self.derivatives_dir / keys.validate_derivative(key)
+
+    def derivative_version_dir(self, asset_id: str, version_no: int) -> Path:
+        """某个版本的全部派生文件所在目录，清理时整目录删除。"""
+        return self.derivatives_dir / _safe_segment(asset_id[:2]) / _safe_segment(asset_id) / (
+            f"v{version_no}"
+        )
 
     def public_dir_for(self, asset_id: str) -> Path:
         return self.public_dir / _safe_segment(asset_id)
@@ -104,6 +117,17 @@ class LocalStorage:
     def public_version_path(self, asset_id: str, version_no: int, extension: str) -> Path:
         """带版本号的公开地址：``public/<id>/v/<n>/original.jpg``。"""
         return self.public_dir_for(asset_id) / "v" / str(version_no) / f"original.{extension}"
+
+    def public_derivative_path(self, asset_id: str, purpose: str) -> Path:
+        """派生文件的公开地址：``public/<id>/thumb.webp``。
+
+        派生地址不带版本号：网站只引用「当前这一版」的缩略图，具体是哪一版由
+        发布快照决定，路径保持稳定。
+        """
+        filename = keys.DERIVATIVE_FILENAMES.get(purpose)
+        if filename is None:
+            raise ValueError(f"未知派生用途：{purpose}")
+        return self.public_dir_for(asset_id) / filename
 
     def session_dir(self, session_id: str) -> Path:
         return self.tmp_dir / "uploads" / _safe_segment(session_id)
@@ -200,17 +224,28 @@ class LocalStorage:
 
     # —— 公开区 ——
 
-    def link_public(self, source: Path, *, asset_id: str, targets: Iterable[Path]) -> list[Path]:
-        """把原件挂进公开区。同盘用硬链接，跨盘退化为复制。
+    def link_public(
+        self,
+        pairs: Iterable[tuple[Path, Path]],
+        *,
+        asset_id: str,
+        clear_on_error: bool = True,
+    ) -> list[Path]:
+        """把「源文件 → 公开路径」逐对挂进公开区。
 
-        先写 ``<名字>.tmp`` 再 ``os.replace`` 成正式名：Nginx 只会看到完整的文件，
-        中途失败留下的是 ``.tmp``（fsck 会报出来），不是半个可访问的文件。
-        失败时清掉该内容刚建的部分，避免出现"只公开了一半"。
+        同盘用硬链接，跨盘退化为复制。每个文件先写 ``<名字>.tmp`` 再 ``os.replace``：
+        Nginx 只会看到完整的文件，中途失败留下的是 ``.tmp``（fsck 会报出来），
+        不是半个可访问的文件。
+
+        ``clear_on_error`` 在整目录重建时为真：失败就把这条内容刚建的部分清掉，
+        避免「只公开了一半」。只补一个派生文件时为假——那时失败若清整目录，
+        会把仍然有效的原图一起删掉。
         """
         linked: list[Path] = []
         copied = not self.same_filesystem()
+        staging: Path | None = None
         try:
-            for target in targets:
+            for source, target in pairs:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 staging = target.with_name(f"{target.name}.tmp")
                 staging.unlink(missing_ok=True)
@@ -219,9 +254,13 @@ class LocalStorage:
                 else:
                     os.link(source, staging)
                 os.replace(staging, target)
+                staging = None
                 linked.append(target)
         except OSError:
-            self.clear_public(asset_id)
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+            if clear_on_error:
+                self.clear_public(asset_id)
             raise
         return linked
 
@@ -272,6 +311,10 @@ class LocalStorage:
     def discard_original(self, key: str) -> None:
         with contextlib.suppress(OSError, keys.InvalidStorageKey):
             self.original_path(key).unlink(missing_ok=True)
+
+    def discard_derivatives(self, asset_id: str, version_no: int) -> None:
+        """删掉一个版本的全部派生文件。版本被保留规则淘汰时调用。"""
+        shutil.rmtree(self.derivative_version_dir(asset_id, version_no), ignore_errors=True)
 
     def free_bytes(self) -> int:
         """数据盘剩余空间。数据目录还没建立时向上找已有的父目录。"""

@@ -27,8 +27,9 @@ from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
 from .db import create_engine, run_migrations
 from .errors import ApiError
-from .log import configure_logging
-from .models import Asset, User, utcnow
+from .jobs import service as jobs_service
+from .log import configure_logging, ensure_utf8_stdout
+from .models import JOB_DONE, JOB_FAILED, JOB_PENDING, JOB_RUNNING, Asset, User, utcnow
 from .storage import LocalStorage
 from .uploads import service as upload_service
 
@@ -48,6 +49,8 @@ _ISSUE_LABELS = {
 
 def main(argv: Sequence[str] | None = None) -> int:
     """命令入口。返回进程退出码。"""
+    # 先统一输出编码：下面的中文提示在 Windows 控制台上也要能看清。
+    ensure_utf8_stdout()
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
@@ -78,6 +81,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     check = subcommands.add_parser("check-config", help="只校验配置，不启动服务")
     check.set_defaults(handler=_cmd_check_config)
+
+    worker = subcommands.add_parser(
+        "worker", help="运行后台 worker：缩略图、定时发布、到期清理"
+    )
+    worker.add_argument("--once", action="store_true", help="处理完当前排队的任务就退出")
+    worker.set_defaults(handler=_cmd_worker)
+
+    jobs = subcommands.add_parser("jobs", help="后台任务")
+    job_actions = jobs.add_subparsers(dest="action", required=True)
+    job_list = job_actions.add_parser("list", help="列出任务与最近一次错误")
+    job_list.add_argument(
+        "--status",
+        default=None,
+        choices=[JOB_PENDING, JOB_RUNNING, JOB_DONE, JOB_FAILED],
+        help="只看某个状态",
+    )
+    job_list.add_argument("--limit", type=int, default=50, help="最多列出多少条，默认 50")
+    job_list.set_defaults(handler=_cmd_jobs_list)
 
     upload = subcommands.add_parser("import", help="从服务器本地路径导入文件")
     upload.add_argument("path", type=Path, help="要导入的文件路径")
@@ -514,6 +535,41 @@ def _cmd_check_config(args: argparse.Namespace) -> int:
     print(f"元数据库：{settings.db_path}")
     print(f"公开基址：{settings.public_base_url}")
     print(f"来源文件：{settings.config_path}")
+    return 0
+
+
+def _cmd_worker(args: argparse.Namespace) -> int:
+    """后台 worker。部署时由独立的 systemd 单元启动（第 9 部分给单元文件）。"""
+    from .worker import run_forever, run_until_idle
+
+    settings = _load(args)
+    configure_logging(settings.log_level)
+    if args.once:
+        processed = run_until_idle(settings)
+        print(f"处理了 {processed} 个任务")
+    else:
+        run_forever(settings)
+    return 0
+
+
+def _cmd_jobs_list(args: argparse.Namespace) -> int:
+    """列出任务。失败的任务留在队列里，这里是所有者查看它们的地方。"""
+    settings = _load(args)
+    with _session(settings) as db:
+        jobs = jobs_service.list_jobs(db, status=args.status, limit=args.limit)
+        if not jobs:
+            print("没有符合条件的任务")
+            return 0
+        for job in jobs:
+            error = (job.last_error or "").replace("\n", " ")[:120]
+            line = (
+                f"{job.id}\t{job.kind}\t{job.status}\t尝试 {job.attempts}\t"
+                f"{job.created_at.isoformat()}\t{error}"
+            )
+            print(line.rstrip())
+        failed = [job for job in jobs if job.status == JOB_FAILED]
+        if failed:
+            print(f"其中 {len(failed)} 个任务已停在失败状态，请按 last_error 排查原因。")
     return 0
 
 

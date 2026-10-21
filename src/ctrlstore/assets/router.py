@@ -155,15 +155,28 @@ def publish_asset(
     principal: deps.Principal = Depends(deps.require_permission("asset.publish")),
     db: DbSession = Depends(deps.get_db),
 ) -> AssetDetailOut:
-    """把当前版本发布成线上版本，并复制标题、摘要、封面与标签快照。"""
+    """把当前版本发布成线上版本，并复制标题、摘要、封面与标签快照。
+
+    带未来的 ``publish_at`` 时只登记计划：到点前不写快照、不进公开区，
+    由 worker 的每分钟任务执行（企划第 8.6 节 P0-7）。
+    """
     asset = service.get_asset(db, asset_id)
-    publish.publish(
-        db,
-        storage=_storage(request),
-        asset=asset,
-        revision=payload.revision,
-        actor=principal.user,
-    )
+    if payload.publish_at is not None and publish.is_future(payload.publish_at):
+        publish.schedule(
+            db,
+            asset=asset,
+            revision=payload.revision,
+            actor=principal.user,
+            when=payload.publish_at,
+        )
+    else:
+        publish.publish(
+            db,
+            storage=_storage(request),
+            asset=asset,
+            revision=payload.revision,
+            actor=principal.user,
+        )
     return _detail(asset)
 
 

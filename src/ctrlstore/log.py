@@ -101,12 +101,21 @@ def _describe_exception(exc_info: tuple[type[BaseException], BaseException, Any]
     return {"type": exc_type.__name__, "message": str(exc)}
 
 
+def ensure_utf8_stdout() -> None:
+    """把标准输出与错误流改成 UTF-8。
+
+    Debian 的 locale 本来就是 UTF-8；Windows 控制台默认跟随本地代码页（如 cp936），
+    中文命令输出会变成乱码。这里统一一次，命令行与日志共用。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def configure_logging(level: str = "INFO", *, service: str = "ctrlstore") -> None:
     """安装唯一一个 stdout 处理器。可重复调用，不会叠加处理器。"""
     # 每行 JSON 必须是 UTF-8，否则 journald 与日志采集器会把它当成二进制。
-    # Windows 上 stdout 默认跟随本地代码页（如 cp936），这里统一改掉。
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    ensure_utf8_stdout()
 
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter(service))

@@ -107,6 +107,19 @@ class Settings(BaseSettings):
     # —— 单文件上限 ——
     limits: SizeLimits = Field(default_factory=SizeLimits)
 
+    # —— 版本保留与回收站（企划第 11.3、8.8 节）——
+    #: 图片、文档保留的版本数。两个指针占用的版本不计入这条上限。
+    version_retention: int = 5
+    #: 视频只留待发布版与已发布版。
+    video_version_retention: int = 2
+    #: 回收站保留天数。到期由 worker 彻底删除；仍被引用的会跳过。
+    trash_retention_days: int = 30
+
+    # —— 派生文件（第 7 部分）——
+    #: 缩略图最长边（像素）。展示图留给后续增强，先只定尺寸。
+    thumb_max_side: int = 480
+    display_max_side: int = 1600
+
     # —— 会话与 Cookie ——
     #: 绝对有效期（小时），从登录算起。
     session_absolute_hours: int = 12
@@ -158,6 +171,19 @@ class Settings(BaseSettings):
     def _ratio_in_range(cls, value: float) -> float:
         if not 0 < value < 1:
             raise ValueError("必须在 0 与 1 之间")
+        return value
+
+    @field_validator(
+        "version_retention",
+        "video_version_retention",
+        "trash_retention_days",
+        "thumb_max_side",
+        "display_max_side",
+    )
+    @classmethod
+    def _positive_int(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("必须是正整数")
         return value
 
     @field_validator("log_level")

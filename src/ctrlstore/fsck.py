@@ -113,7 +113,7 @@ def _check_public_area(
         # 公开区仍应指向旧版，不能拿当前版本去判断。
         wanted = publish.desired_links(asset) if asset else None
         expected = (
-            {path.relative_to(storage.public_dir) for path in wanted.paths(storage)}
+            {path.relative_to(storage.public_dir) for path in wanted.targets(storage)}
             if wanted
             else set()
         )
@@ -140,7 +140,7 @@ def _check_missing_links(
         wanted = publish.desired_links(asset)
         if wanted is None:
             continue
-        for path in wanted.paths(storage):
+        for path in wanted.targets(storage):
             if not path.is_file():
                 report.add(MISSING_LINK, str(path.relative_to(storage.public_dir)), fixable=True)
         if fix:

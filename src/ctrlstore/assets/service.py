@@ -36,14 +36,8 @@ from ..models import (
     utcnow,
 )
 from ..storage import LocalStorage, keys
-from ..uploads.inspection import KIND_MARKDOWN, KIND_TEXT, KIND_VIDEO, Inspection
-from . import markdown
-
-#: 版本保留：图片、文档留最近 5 版。
-MAX_VERSIONS = 5
-
-#: 视频留待发布版与已发布版，因此上限 2。
-MAX_VERSIONS_VIDEO = 2
+from ..uploads.inspection import KIND_IMAGE, KIND_MARKDOWN, KIND_TEXT, KIND_VIDEO, Inspection
+from . import derivatives, markdown
 
 #: 列表默认与最大条数（企划第 13.2 节）。
 DEFAULT_LIMIT = 50
@@ -117,7 +111,10 @@ def register_upload(
         asset.revision += 1
     asset.updated_at = utcnow()
 
-    prune_versions(db, storage=storage, asset=asset)
+    prune_versions(db, storage=storage, asset=asset, settings=settings)
+    # 图片入库后立刻排缩略图；发布不依赖它完成（企划第 8.5 节 D1）。
+    if asset.kind == KIND_IMAGE:
+        derivatives.schedule_thumbnail(db, asset=asset, version=version)
     audit.record(
         db,
         action=audit.ASSET_VERSION_ADDED if version_no > 1 else audit.ASSET_CREATED,
@@ -320,7 +317,7 @@ def _write_body(
     parsed = markdown.parse(body) if asset.kind == KIND_MARKDOWN else None
     if parsed is not None:
         refresh_references(db, asset, body=body)
-    prune_versions(db, storage=storage, asset=asset)
+    prune_versions(db, storage=storage, asset=asset, settings=settings)
     return parsed
 
 
@@ -438,14 +435,19 @@ def next_version_no(db: DbSession, asset: Asset) -> int:
     return int(highest or 0) + 1
 
 
-def prune_versions(db: DbSession, *, storage: LocalStorage, asset: Asset) -> int:
-    """按保留规则删旧版本。当前版本与已发布版本指向的文件永远保留。
+def prune_versions(
+    db: DbSession, *, storage: LocalStorage, asset: Asset, settings: Settings
+) -> int:
+    """按保留规则删旧版本，连带删掉它们的派生文件。
 
+    当前版本与已发布版本指向的文件永远保留（企划第 11.3 节）。
     顺序是先删文件再删行，两者都在同一个请求事务里。若提交阶段失败，
     可能出现「行还在、文件已删」的状态；这类不一致由 ``fsck`` 报告（第 5、9 部分），
     不在这里用两阶段提交换复杂度。
     """
-    keep_limit = MAX_VERSIONS_VIDEO if asset.kind == KIND_VIDEO else MAX_VERSIONS
+    keep_limit = (
+        settings.video_version_retention if asset.kind == KIND_VIDEO else settings.version_retention
+    )
     protected = {asset.current_version_id, asset.published_version_id} - {None}
 
     versions = sorted(asset.versions, key=lambda item: item.version_no, reverse=True)
@@ -454,6 +456,7 @@ def prune_versions(db: DbSession, *, storage: LocalStorage, asset: Asset) -> int
     for version in versions:
         if version.id in keep_ids:
             continue
+        derivatives.discard_for_version(db, storage=storage, version=version)
         storage.discard_original(version.storage_key)
         db.delete(version)
         removed += 1
