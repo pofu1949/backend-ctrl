@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     #: 全库内容条数配额。
     library_quota_items: int = 0
 
+    #: 文案独立计数，不占内容条数或字节配额。
+    entry_limit: int = Field(default=2000, ge=1)
+
     # —— 运维（第 9 部分）——
     #: 备份根目录。所有者健康接口读这里最新的成功清单；脚本默认 /var/backups/ctrlstore。
     backup_dir: Path | None = None

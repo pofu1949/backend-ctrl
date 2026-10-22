@@ -27,6 +27,8 @@
     ['folder.manage', '管理目录'],
     ['collection.manage', '管理集合'],
     ['tag.manage', '管理标签'],
+    ['entry.update', '新建与修改文案'],
+    ['entry.publish', '发布与撤回文案'],
   ];
   const STATUS = {
     draft: ['草稿', 'draft'],
@@ -47,6 +49,8 @@
     failed: ['失败', 'failed'],
   };
   const AUDIT_LABELS = {
+    entry_created: '新建文案', entry_updated: '修改文案', entry_published: '发布文案',
+    entry_unpublished: '撤回文案', entry_deleted: '删除文案',
     login: '登录',
     login_failed: '登录失败',
     logout: '退出登录',
@@ -248,6 +252,11 @@
     return payload;
   }
 
+  const entriesUI = window.CtrlStoreEntries.create({
+    api, esc, can, isOwner, openModal, closeModal, confirmDialog, toast,
+    isActive: () => Boolean(state.me) && state.route === 'entries' && (can('entry.update') || can('entry.publish')),
+  });
+
   /* ------------------------------------------------------------
      Boot / login / shell
      ------------------------------------------------------------ */
@@ -294,6 +303,7 @@
 
     $$('.nav-item[data-owner]').forEach(el => { el.hidden = !isOwner(); });
     $$('.nav-item[data-perm]').forEach(el => { el.hidden = !can(el.dataset.perm); });
+    $$('.nav-item[data-perms-any]').forEach(el => { el.hidden = !el.dataset.permsAny.split(',').some(can); });
     $$('.nav-group').forEach(group => {
       const items = $$('.nav-item', group).filter(item => !item.hidden);
       group.hidden = items.length === 0;
@@ -310,6 +320,7 @@
     if (isOwner()) return 'dashboard';
     if (can('asset.read')) return 'library';
     if (can('asset.upload')) return 'upload';
+    if (can('entry.update') || can('entry.publish')) return 'entries';
     return 'no-access';
   }
 
@@ -379,6 +390,7 @@
   function allowedRoute(name) {
     if (name === 'no-access') return true;
     if (['dashboard', 'sites', 'users', 'system'].includes(name)) return isOwner();
+    if (name === 'entries') return can('entry.update') || can('entry.publish');
     if (name === 'upload') return can('asset.upload');
     if (name === 'trash') return can('asset.trash');
     if (['library', 'asset', 'editor', 'collections'].includes(name)) return can('asset.read');
@@ -409,6 +421,7 @@
       else if (route === 'asset') await renderAsset(param);
       else if (route === 'editor') await renderEditor(param);
       else if (route === 'upload') renderUploadPage();
+      else if (route === 'entries') await entriesUI.render();
       else if (route === 'collections') await renderCollections();
       else if (route === 'sites') await renderSites();
       else if (route === 'users') await renderUsers();
@@ -426,7 +439,7 @@
   function updateChrome(route) {
     const labels = {
       dashboard: '总览', library: '内容库', asset: '内容库 / 内容详情', editor: '内容库 / Markdown 编辑',
-      upload: '上传', collections: '集合', sites: '站点与令牌', users: '账号与权限',
+      entries: '文案', upload: '上传', collections: '集合', sites: '站点与令牌', users: '账号与权限',
       trash: '回收站', system: '系统状态', 'no-access': '访问受限',
     };
     $('#crumb').textContent = labels[route] || '总览';
@@ -518,7 +531,7 @@
     $('#modalBody').scrollTop = 0;
     $('#modalLayer').classList.add('open');
     setTimeout(() => {
-      const first = $('#modalBody input:not([type=hidden]), #modalBody select, #modalBody textarea, #modalFoot button');
+      const first = $('#modalBody input:not([type=hidden]):not(:disabled), #modalBody select:not(:disabled), #modalBody textarea:not(:disabled), #modalFoot button:not(:disabled)');
       first?.focus();
     }, 30);
   }
@@ -534,7 +547,7 @@
     else toast(message, 'error');
   }
 
-  function confirmDialog({ kicker = 'Confirm', title, body, confirmLabel = '确认', onConfirm }) {
+  function confirmDialog({ kicker = 'Confirm', title, body, confirmLabel = '确认', onConfirm, onError }) {
     state.modalConfirm = onConfirm;
     openModal({
       kicker, title,
@@ -556,7 +569,8 @@
         if (error.status !== 401) {
           button.disabled = false;
           button.textContent = old;
-          showConfirmError(error);
+          if (onError) await onError(error);
+          else showConfirmError(error);
         }
       }
     });
@@ -1666,8 +1680,8 @@
 
   function usersHTML() {
     const selected = state.selectedUser;
-    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Accounts<span class="slash">/</span><span class="en">账号与权限</span></div><h1>谁可以碰这些内容</h1><p class="desc">唯一所有者不读权限表；编辑的八项能力由所有者逐项授予或收回。</p></div><div class="actions"><button class="btn primary sm" data-action="new-editor"><svg class="icon sm"><use href="#i-plus"/></svg>新建编辑</button></div></div>
-      <div class="users-layout"><div class="user-list-panel"><div class="user-list-head"><span>${state.users.length} ACCOUNTS</span><span>ROLE / STATUS</span></div>${state.users.map(user => `<button class="user-row ${selected?.id === user.id ? 'active' : ''}" data-action="select-user" data-id="${attr(user.id)}"><div class="avatar">${esc(user.username.slice(0, 1).toUpperCase())}</div><div class="info"><div class="name">${esc(user.username)} <span class="role-label">${user.role === 'owner' ? 'OWNER' : 'EDITOR'}</span></div><div class="role">${user.role === 'owner' ? '全部权限' : `${user.permissions.length} / 8 项能力`}</div></div><div class="last">${user.disabled ? '已停用' : '正常'}</div></button>`).join('')}<div class="filter-rule" style="margin:0;padding:12px 14px">编辑可以看见全库草稿；第一期不按目录拆开可见性。</div></div>
+    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Accounts<span class="slash">/</span><span class="en">账号与权限</span></div><h1>谁可以碰这些内容</h1><p class="desc">唯一所有者不读权限表；编辑的内容与文案能力由所有者逐项授予或收回。</p></div><div class="actions"><button class="btn primary sm" data-action="new-editor"><svg class="icon sm"><use href="#i-plus"/></svg>新建编辑</button></div></div>
+      <div class="users-layout"><div class="user-list-panel"><div class="user-list-head"><span>${state.users.length} ACCOUNTS</span><span>ROLE / STATUS</span></div>${state.users.map(user => `<button class="user-row ${selected?.id === user.id ? 'active' : ''}" data-action="select-user" data-id="${attr(user.id)}"><div class="avatar">${esc(user.username.slice(0, 1).toUpperCase())}</div><div class="info"><div class="name">${esc(user.username)} <span class="role-label">${user.role === 'owner' ? 'OWNER' : 'EDITOR'}</span></div><div class="role">${user.role === 'owner' ? '全部权限' : `${user.permissions.length} / ${PERMISSIONS.length} 项能力`}</div></div><div class="last">${user.disabled ? '已停用' : '正常'}</div></button>`).join('')}<div class="filter-rule" style="margin:0;padding:12px 14px">内容与文案分别授权；拥有文案修改或发布权限时可查看文案草稿。</div></div>
       ${selected ? userDetailHTML(selected) : '<div class="panel"><div class="empty-state" style="border:0"><h2>还没有账号</h2></div></div>'}
       </div>`;
   }
@@ -1676,7 +1690,7 @@
     if (user.role === 'owner') {
       return `<div class="permission-panel"><div class="permission-head"><div><div class="eyebrow"><span class="dot"></span>Owner profile</div><h2>${esc(user.username)}</h2><div class="sub">唯一所有者 · 拥有全部能力</div></div><span class="pill published"><i></i>账号正常</span></div><div class="permission-body"><div class="permission-banner"><svg class="icon"><use href="#i-shield"/></svg><div><b>所有者不受权限表限制</b><span>不能创建第二个所有者，也不能删除或降级这一个账号。</span></div></div><div class="owner-note">账号管理、站点令牌、彻底删除、配额、备份与 fsck 只属于所有者。所有者也不接受整体替换权限。</div></div></div>`;
     }
-    return `<div class="permission-panel"><div class="permission-head"><div><div class="eyebrow"><span class="dot"></span>Editor profile</div><h2>${esc(user.username)}</h2><div class="sub">${user.disabled ? '账号已停用' : '编辑账号'} · 创建于 ${esc(dateFmt(user.created_at, false))}</div></div><span class="pill ${user.disabled ? 'private' : 'published'}"><i></i>${user.disabled ? '已停用' : '账号正常'}</span></div><div class="permission-body"><div class="permission-banner"><svg class="icon"><use href="#i-shield"/></svg><div><b>权限只影响管理操作</b><span>没有发布权限的编辑可以替换文件，但不会改变线上那一版。</span></div></div><div class="permission-grid" id="permissionGrid">${PERMISSIONS.map(([key, label]) => `<div class="perm-row"><div class="perm-text"><b>${esc(label)}</b><span>${esc(key)}</span></div><button class="switch ${user.permissions.includes(key) ? 'on' : ''}" role="switch" aria-checked="${user.permissions.includes(key)}" data-action="perm-toggle" data-perm="${key}" aria-label="${esc(label)}"></button></div>`).join('')}</div><div class="permission-foot"><span class="count">已授予 <b id="permCount">${user.permissions.length}</b> / 8 项能力 · 变更立即生效</span><div style="display:flex;gap:6px"><button class="btn secondary sm" data-action="reset-password">重置密码</button><button class="btn secondary sm" data-action="disable-user" ${user.disabled ? 'disabled' : ''}>${user.disabled ? '已停用' : '停用账号'}</button><button class="btn primary sm" data-action="save-permissions">保存权限</button></div></div><div class="owner-note" style="margin-top:14px"><b>账号恢复：</b>停用后会话与令牌立即失效；第一期不支持重新启用，需要重建账号。</div></div></div>`;
+    return `<div class="permission-panel"><div class="permission-head"><div><div class="eyebrow"><span class="dot"></span>Editor profile</div><h2>${esc(user.username)}</h2><div class="sub">${user.disabled ? '账号已停用' : '编辑账号'} · 创建于 ${esc(dateFmt(user.created_at, false))}</div></div><span class="pill ${user.disabled ? 'private' : 'published'}"><i></i>${user.disabled ? '已停用' : '账号正常'}</span></div><div class="permission-body"><div class="permission-banner"><svg class="icon"><use href="#i-shield"/></svg><div><b>权限只影响管理操作</b><span>没有发布权限的编辑可以替换文件，但不会改变线上那一版。</span></div></div><div class="permission-grid" id="permissionGrid">${PERMISSIONS.map(([key, label]) => `<div class="perm-row"><div class="perm-text"><b>${esc(label)}</b><span>${esc(key)}</span></div><button class="switch ${user.permissions.includes(key) ? 'on' : ''}" role="switch" aria-checked="${user.permissions.includes(key)}" data-action="perm-toggle" data-perm="${key}" aria-label="${esc(label)}"></button></div>`).join('')}</div><div class="permission-foot"><span class="count">已授予 <b id="permCount">${user.permissions.length}</b> / ${PERMISSIONS.length} 项能力 · 变更立即生效</span><div style="display:flex;gap:6px"><button class="btn secondary sm" data-action="reset-password">重置密码</button><button class="btn secondary sm" data-action="disable-user" ${user.disabled ? 'disabled' : ''}>${user.disabled ? '已停用' : '停用账号'}</button><button class="btn primary sm" data-action="save-permissions">保存权限</button></div></div><div class="owner-note" style="margin-top:14px"><b>账号恢复：</b>停用后会话与令牌立即失效；第一期不支持重新启用，需要重建账号。</div></div></div>`;
   }
 
   function openNewEditorModal() {

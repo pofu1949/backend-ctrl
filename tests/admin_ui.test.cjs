@@ -41,6 +41,8 @@ function harness(handler) {
     },
   });
   const path = require('node:path').join(__dirname, '../src/ctrlstore/admin_ui/assets/admin.js');
+  const entryPath = require('node:path').join(__dirname, '../src/ctrlstore/admin_ui/assets/entries.js');
+  vm.runInContext(readFileSync(entryPath, 'utf8'), context);
   const source = readFileSync(path, 'utf8').replace('  boot();', `
     globalThis.ui = { state, uploadOne, saveEditor, updateEditorPreview, uploadQueueHTML, showConfirmError };
   `);

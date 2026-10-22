@@ -34,7 +34,7 @@ def test_owner_has_every_permission_without_table_rows() -> None:
     granted = permissions.effective("owner", [])
 
     assert granted == frozenset(permissions.PERMISSIONS)
-    assert len(granted) == 8
+    assert len(granted) == 10
 
 
 def test_editor_has_only_granted_permissions() -> None:
@@ -47,7 +47,9 @@ def test_unknown_permission_is_rejected() -> None:
 
 
 def test_editor_preset_is_all_eight() -> None:
-    assert permissions.from_preset("editor") == set(permissions.PERMISSIONS)
+    assert permissions.from_preset("editor") == set(permissions.PRESET_EDITOR)
+    assert len(permissions.from_preset("editor")) == 8
+    assert not any(name.startswith("entry.") for name in permissions.from_preset("editor"))
 
 
 def test_token_plaintext_contains_id_but_store_holds_only_hash(db: DbSession, owner) -> None:

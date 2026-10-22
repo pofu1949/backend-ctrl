@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 1–9 部分已完成**；第 10 部分的管理端已接入 `/admin/`，可直接使用真实管理 API。
+当前进度：**第 1–11 部分已实现**；管理端位于 `/admin/`，包含独立的文案字典页。
 
 ## 目录
 
@@ -29,7 +29,7 @@ backend_ctrl/
       passwords.py          Argon2id
       sessions.py           Cookie 会话（库里存哈希）
       tokens.py             访问令牌
-      permissions.py        八项能力与语义
+      permissions.py        八项内容能力、两项文案能力与预设
       throttle.py           登录失败限速
       service.py            接口与命令行共用的业务规则
       deps.py               身份解析与权限检查的唯一入口
@@ -54,12 +54,16 @@ backend_ctrl/
     collections/            集合与站点授权
       service.py            集合 CRUD、排序、前缀匹配
       router.py schemas.py  管理接口 /collections、/sites/{id}/grants
+    entries/                文案字典（独立于文件资产）
+      validation.py         HTTP / CLI 共用校验
+      service.py            草稿、发布快照、修订号、条数限制与审计
+      router.py schemas.py  管理接口 /entries
     content/                内容处理
       markdown_render.py    Markdown 渲染与 HTML 消毒
     public_api/             公开接口 /api/public
       deps.py               站点身份与可见性判定（单一入口）
       payloads.py           公开响应形状
-      collections.py assets.py files.py
+      collections.py assets.py files.py entries.py
     fsck.py                 一致性检查
     imaging/                缩略图与展示图
     jobs/                   任务队列与处理器（缩略图、抽取、视频、定时发布、清理）
@@ -69,7 +73,7 @@ backend_ctrl/
     worker.py               后台 worker 入口
     quota.py                字节与条数配额
     backup.py               备份清单读取（健康接口）
-  alembic/                  迁移脚本（0001 基线 … 0010 令牌 IP 与路径账本）
+  alembic/                  迁移脚本（0001 基线 … 0011 文案字典）
   deploy/
     nginx/nginx.conf.example           worker_processes 2 的主配置
     nginx/ctrlstore.conf.example       站点片段
@@ -119,6 +123,19 @@ http://127.0.0.1:8000/admin/
 生产若在 Nginx 后面，`deploy/nginx/ctrlstore.conf.example` 已将 `/admin/` 反代到 API 进程。
 
 界面总览：[docs/admin-ui/overview.png](docs/admin-ui/overview.png)。完整页面截图在 [`docs/admin-ui/`](docs/admin-ui/)。
+
+## 文案字典
+
+在管理端「文案」中按键维护短句，例如 `nav.about`。保存只改草稿，点击“发布已保存草稿”才更新网站读取的快照。所有者拥有全部能力；`entry.update` 可新建、修改并查看草稿，`entry.publish` 可审核、发布和撤回。预设 `editor` 仍是原有八项内容权限，`copywriter` 只含两项文案权限。
+
+```bash
+ctrlstore entry set nav.about --value '关于我们'
+ctrlstore entry publish nav.about
+curl 'http://127.0.0.1:8000/api/public/v1/entries/nav.about?language=zh-CN'
+ctrlstore entry unpublish nav.about
+```
+
+值是纯文本，网站使用文本节点插入。站点令牌读取同键时，本站专属优先于库级；不会回退到其他语言。默认全库最多 2000 条，使用 `entry_limit` 配置。API、分页、缓存、站点隔离与开发说明见 [docs/entries.md](docs/entries.md)。
 
 ## 配置
 

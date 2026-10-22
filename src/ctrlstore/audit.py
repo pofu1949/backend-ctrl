@@ -28,6 +28,12 @@ TARGET_FOLDER = "folder"
 TARGET_TAG = "tag"
 TARGET_ASSET = "asset"
 TARGET_COLLECTION = "collection"
+TARGET_ENTRY = "entry"
+ENTRY_CREATED = "entry_created"
+ENTRY_UPDATED = "entry_updated"
+ENTRY_PUBLISHED = "entry_published"
+ENTRY_UNPUBLISHED = "entry_unpublished"
+ENTRY_DELETED = "entry_deleted"
 
 #: 已知动作。集中列出，避免日志和界面里出现拼错的动作名。
 LOGIN = "login"

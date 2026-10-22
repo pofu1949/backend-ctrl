@@ -27,6 +27,7 @@ from .assets import service as asset_service
 from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
 from .db import create_engine, run_migrations
+from .entries import service as entry_service
 from .errors import ApiError
 from .jobs import service as jobs_service
 from .log import configure_logging, ensure_utf8_stdout
@@ -83,9 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
     check = subcommands.add_parser("check-config", help="只校验配置，不启动服务")
     check.set_defaults(handler=_cmd_check_config)
 
-    worker = subcommands.add_parser(
-        "worker", help="运行后台 worker：缩略图、定时发布、到期清理"
-    )
+    worker = subcommands.add_parser("worker", help="运行后台 worker：缩略图、定时发布、到期清理")
     worker.add_argument("--once", action="store_true", help="处理完当前排队的任务就退出")
     worker.set_defaults(handler=_cmd_worker)
 
@@ -128,7 +127,68 @@ def _build_parser() -> argparse.ArgumentParser:
     _build_user_commands(subcommands)
     _build_site_commands(subcommands)
     _build_token_commands(subcommands)
+    _build_entry_commands(subcommands)
     return parser
+
+
+def _build_entry_commands(subcommands) -> None:
+    entry = subcommands.add_parser("entry", help="短文案字典")
+    actions = entry.add_subparsers(dest="action", required=True)
+    for action, description in (
+        ("set", "新建或修改草稿"),
+        ("publish", "发布"),
+        ("unpublish", "撤回"),
+    ):
+        command = actions.add_parser(action, help=description)
+        command.add_argument("key", help="文案键，例如 nav.about")
+        command.add_argument("--language", default="zh-CN")
+        command.add_argument("--site", default=None, help="站点标识；省略表示库级")
+        if action == "set":
+            command.add_argument("--value", required=True, help="纯文本，保存后仍需发布")
+            command.add_argument("--visibility", choices=["public", "site"], default=None)
+        command.set_defaults(handler=_cmd_entry)
+
+
+def _cmd_entry(args: argparse.Namespace) -> int:
+    settings = _load(args)
+    with _session(settings) as db:
+        actor = _actor(db)
+        entry_service.begin_write(db)
+        site = service.find_site(db, args.site) if args.site else None
+        if args.site and site is None:
+            raise ApiError.invalid(f"站点不存在：{args.site}")
+        site_id = site.id if site else None
+        entry = entry_service.find_by_key(db, args.key, language=args.language, site_id=site_id)
+        if args.action == "set":
+            fields = {"value": args.value}
+            if args.visibility is not None:
+                fields["visibility"] = args.visibility
+            if entry is None:
+                entry = entry_service.create(
+                    db,
+                    settings=settings,
+                    actor=actor,
+                    fields={
+                        "key": args.key,
+                        "language": args.language,
+                        "site_id": site_id,
+                        **fields,
+                    },
+                )
+            else:
+                entry = entry_service.update(
+                    db, entry.id, revision=entry.revision, fields=fields, actor=actor
+                )
+            print(f"已保存文案草稿：{entry.key}（{entry.language}）revision={entry.revision}")
+        else:
+            if entry is None:
+                raise ApiError.not_found("文案不存在")
+            action = entry_service.publish if args.action == "publish" else entry_service.unpublish
+            entry = action(db, entry.id, revision=entry.revision, actor=actor)
+            print(
+                f"文案状态：{entry.key}（{entry.language}）{entry.status} revision={entry.revision}"
+            )
+    return 0
 
 
 def _build_user_commands(subcommands) -> None:
@@ -235,7 +295,7 @@ def _add_permission_flags(parser: argparse.ArgumentParser, *, required: bool = F
         default=[],
         choices=sorted(permissions.PRESETS),
         metavar="NAME",
-        help="预设，可重复。editor 一次授予全部八项",
+        help="预设，可重复。editor 为八项内容权限，copywriter 为两项文案权限",
     )
     if required:
         parser.set_defaults(_permission_required=True)

@@ -49,6 +49,49 @@ class Base(DeclarativeBase):
     """所有表的基类。迁移的 ``target_metadata`` 指向它的 metadata。"""
 
 
+class Entry(Base):
+    """短文案。编辑字段与发布快照分开，不创建文件或资产记录。"""
+
+    __tablename__ = "entries"
+    __table_args__ = (
+        Index(
+            "ux_entries_library_published",
+            "published_language",
+            "published_key",
+            unique=True,
+            sqlite_where=text("status = 'published' AND published_site_id IS NULL"),
+        ),
+        Index(
+            "ux_entries_site_published",
+            "published_site_id",
+            "published_language",
+            "published_key",
+            unique=True,
+            sqlite_where=text("status = 'published' AND published_site_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    key: Mapped[str] = mapped_column(String(128))
+    language: Mapped[str] = mapped_column(String(32), default="zh-CN")
+    # 删除站点不能悄悄把专属文案变成库级公开文案。
+    site_id: Mapped[str | None] = mapped_column(ForeignKey("sites.id", ondelete="RESTRICT"))
+    value: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String(16), default="public")
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    published_key: Mapped[str | None] = mapped_column(String(128))
+    published_language: Mapped[str | None] = mapped_column(String(32))
+    published_value: Mapped[str | None] = mapped_column(Text)
+    published_visibility: Mapped[str | None] = mapped_column(String(16))
+    published_site_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sites.id", ondelete="RESTRICT")
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class User(Base):
     """账号。所有者与编辑各一行，角色不能通过接口修改。"""
 

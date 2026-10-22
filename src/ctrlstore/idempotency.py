@@ -78,7 +78,10 @@ def remember(
         )
     )
     if existing is not None:
-        return
+        if existing.created_at >= utcnow() - timedelta(hours=RETENTION_HOURS):
+            return
+        db.delete(existing)
+        db.flush()
     db.add(
         IdempotencyKey(
             actor_id=actor_id,

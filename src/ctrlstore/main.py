@@ -99,7 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_router, prefix=ADMIN_PREFIX)
     app.include_router(public_router, prefix=PUBLIC_PREFIX)
 
-    # 管理端是同一进程提供的单页应用。静态资源只有 CSS / JS 两份，
+    # 管理端是同一进程提供的单页应用。静态资源只有应用样式与脚本，
     # HTML 不内联数据；未登录时页面只显示登录框，真实数据仍由 /api/admin 保护。
     app.mount("/admin/assets", StaticFiles(directory=ASSETS_DIR), name="admin-assets")
 

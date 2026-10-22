@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from ..assets.router import router as assets_router
 from ..collections.router import router as collections_router
+from ..entries.router import router as entries_router
 from ..folders.router import router as folders_router
 from ..tags.router import router as tags_router
 from ..uploads.router import router as uploads_router
@@ -24,6 +25,7 @@ router.include_router(folders_router)
 router.include_router(tags_router)
 router.include_router(assets_router)
 router.include_router(collections_router)
+router.include_router(entries_router)
 router.include_router(dashboard.router)
 router.include_router(search.router)
 router.include_router(health.router)

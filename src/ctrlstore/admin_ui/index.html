@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#190D2E">
 <title>CtrlStore · 管理端</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232A1050'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='serif' font-size='21' fill='%23F8F6FF'%3EC%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/admin/assets/admin.css?v=0.2.2">
+<link rel="stylesheet" href="/admin/assets/admin.css?v=0.3.0">
 </head>
 <body>
 
@@ -91,6 +91,7 @@
       <button class="nav-item" data-route="library" data-perm="asset.read"><svg class="icon"><use href="#i-library"/></svg><span>内容库</span><span class="num">02</span></button>
       <button class="nav-item" data-route="upload" data-perm="asset.upload"><svg class="icon"><use href="#i-upload"/></svg><span>上传</span><span class="num">03</span></button>
       <button class="nav-item" data-route="collections" data-perm="asset.read"><svg class="icon"><use href="#i-layers"/></svg><span>集合</span><span class="num">04</span></button>
+      <button class="nav-item" data-route="entries" data-perms-any="entry.update,entry.publish"><svg class="icon"><use href="#i-text"/></svg><span>文案</span><span class="num">09</span></button>
     </div>
 
     <div class="nav-group">
@@ -225,6 +226,7 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"><svg class="icon"><use href="#i-check"/></svg><span id="toastText"></span></div>
 <noscript><div style="padding:30px">CtrlStore 管理端需要启用 JavaScript。</div></noscript>
-<script src="/admin/assets/admin.js?v=0.2.2"></script>
+<script src="/admin/assets/entries.js?v=0.3.0"></script>
+<script src="/admin/assets/admin.js?v=0.3.0"></script>
 </body>
 </html>
