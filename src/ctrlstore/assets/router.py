@@ -10,19 +10,30 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session as DbSession
 
 from .. import idempotency
 from ..auth import deps
+from ..content import markdown_render
 from ..errors import ApiError
-from ..models import ASSET_PUBLISHED
+from ..models import (
+    ASSET_PUBLISHED,
+    DERIVATIVE_READY,
+    PURPOSE_DISPLAY,
+    PURPOSE_POSTER,
+    PURPOSE_THUMB,
+    Asset,
+)
+from ..public_api import payloads
 from ..storage import LocalStorage
-from . import download, publish, service, signing
+from . import download, markdown, publish, service, signing
 from .schemas import (
     AssetDetailOut,
     AssetListOut,
     AssetOut,
     CreateTextAssetRequest,
+    RenderBodyRequest,
     SignedUrlOut,
     UpdateAssetRequest,
     VersionActionRequest,
@@ -146,6 +157,153 @@ def read_asset(
     db: DbSession = Depends(deps.get_db),
 ) -> AssetDetailOut:
     return _detail(service.get_asset(db, asset_id))
+
+
+# —— 管理端预览与正文 ——
+# 管理端不能直接把 originals/ 暴露给浏览器；这两个接口在鉴权后只读：
+# 卡片拿已经生成的缩略图/封面，详情页允许图片回退到原图，正文只对文本类开放。
+
+
+def _ready_derivative(version, purposes: tuple[str, ...]):
+    """按优先级取一个已经 ready 的派生文件。"""
+    by_purpose = {
+        item.purpose: item
+        for item in version.derivatives
+        if item.status == DERIVATIVE_READY
+    }
+    for purpose in purposes:
+        item = by_purpose.get(purpose)
+        if item is not None:
+            return item
+    return None
+
+
+def _preview_response(path, media_type: str) -> FileResponse:
+    if not path.is_file():
+        raise ApiError.not_found("预览文件尚未生成")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/assets/{asset_id}/thumb")
+def thumb_asset(
+    asset_id: str,
+    request: Request,
+    _: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> FileResponse:
+    """卡片缩略图：只给已经生成的派生文件，不把原图塞进网格。"""
+    asset = service.get_asset(db, asset_id)
+    version = service.current_version(asset)
+    if version is None:
+        raise ApiError.not_found("内容还没有版本")
+    item = _ready_derivative(version, (PURPOSE_THUMB, PURPOSE_POSTER, PURPOSE_DISPLAY))
+    if item is None:
+        raise ApiError.not_found("缩略图尚未生成")
+    storage = _storage(request)
+    return _preview_response(storage.derivative_path(item.storage_key), item.mime)
+
+
+@router.get("/assets/{asset_id}/preview")
+def preview_asset(
+    asset_id: str,
+    request: Request,
+    _: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> FileResponse:
+    """详情预览：优先展示图/缩略图/封面，图片没有派生文件时回退到原图。"""
+    asset = service.get_asset(db, asset_id)
+    version = service.current_version(asset)
+    if version is None:
+        raise ApiError.not_found("内容还没有版本")
+    item = _ready_derivative(version, (PURPOSE_DISPLAY, PURPOSE_THUMB, PURPOSE_POSTER))
+    storage = _storage(request)
+    if item is not None:
+        return _preview_response(storage.derivative_path(item.storage_key), item.mime)
+    if asset.kind == "image":
+        return _preview_response(storage.original_path(version.storage_key), version.mime)
+    raise ApiError.not_found("该内容还没有可预览的封面")
+
+
+@router.get("/assets/{asset_id}/body")
+def read_asset_body(
+    asset_id: str,
+    request: Request,
+    _: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> dict:
+    """Markdown / 纯文本的当前正文。
+
+    正文以原文件形式存在磁盘上（版本不可变），数据库只保存版本索引。
+    管理端编辑需要读回这一份；文件类内容没有这个接口。
+    """
+    asset = service.get_asset(db, asset_id)
+    if asset.kind not in ("markdown", "text"):
+        raise ApiError.invalid("只有 Markdown 与纯文本可以读取正文")
+    version = service.current_version(asset)
+    if version is None:
+        raise ApiError.not_found("内容还没有版本")
+    storage = _storage(request)
+    path = storage.original_path(version.storage_key)
+    if not path.is_file():
+        raise ApiError.not_found("正文文件不存在")
+    limit = request.app.state.settings.limits.for_kind(asset.kind)
+    if path.stat().st_size > limit:
+        raise ApiError.invalid("正文超过该类型上限")
+    try:
+        body = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ApiError.invalid("正文不是合法的 UTF-8") from exc
+    return {
+        "asset_id": asset.id,
+        "kind": asset.kind,
+        "revision": asset.revision,
+        "body": body,
+    }
+
+
+@router.post("/assets/{asset_id}/render")
+def render_asset_body(
+    asset_id: str,
+    payload: RenderBodyRequest,
+    request: Request,
+    response: Response,
+    _: deps.Principal = Depends(deps.require_permission("asset.read")),
+    db: DbSession = Depends(deps.get_db),
+) -> dict:
+    """预览编辑器传来的正文，不保存，也不读取公开文章快照。"""
+    asset = service.get_asset(db, asset_id)
+    if asset.kind not in ("markdown", "text"):
+        raise ApiError.invalid("只有 Markdown 与纯文本可以预览正文")
+    settings = _settings(request)
+    if len(payload.body.encode("utf-8")) > settings.limits.for_kind(asset.kind):
+        raise ApiError.too_large("正文超过该类型上限")
+    response.headers["Cache-Control"] = "no-store"
+    missing: set[str] = set()
+
+    def image_url(image_id: str) -> str | None:
+        image = db.get(Asset, image_id)
+        url = payloads.published_image_url(request, image) if image is not None else None
+        if url is None:
+            missing.add(image_id)
+        return url
+
+    if asset.kind == "text":
+        html = markdown_render.render_plain_text(payload.body)
+    else:
+        html = markdown_render.render(
+            markdown.parse(payload.body).body,
+            image_url=image_url,
+            base_url=settings.public_base_url,
+            mark_missing_images=True,
+        ).html
+    return {"html": html, "missing_asset_ids": sorted(missing)}
 
 
 @router.patch("/assets/{asset_id}", response_model=AssetDetailOut)

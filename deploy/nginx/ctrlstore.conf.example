@@ -80,8 +80,23 @@ server {
         add_header X-Content-Type-Options nosniff always;
     }
 
-    # 管理界面静态资源在第 10 部分再开。
-    # location /admin/ { proxy_pass http://ctrlstore_api; }
+    # —— 管理端 SPA ——
+    # HTML、CSS、JS 都由 API 进程提供；数据仍走 /api/admin/v1，并由会话保护。
+    location = /admin {
+        return 308 /admin/;
+    }
+
+    location /admin/ {
+        proxy_pass http://ctrlstore_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        add_header Cache-Control "no-store" always;
+    }
 
     # —— 备案后启用 ——
     # listen 443 ssl;

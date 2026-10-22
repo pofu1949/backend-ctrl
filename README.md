@@ -6,7 +6,7 @@
 * 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
 * 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
 
-当前进度：**第 1–9 部分已完成**。管理端图形界面（第 10 部分）尚未开始。
+当前进度：**第 1–9 部分已完成**；第 10 部分的管理端已接入 `/admin/`，可直接使用真实管理 API。
 
 ## 目录
 
@@ -14,6 +14,7 @@
 backend_ctrl/
   plan/                     企划书与分步实现规划
   src/ctrlstore/
+    admin_ui/               管理端单页应用（HTML + CSS + JS，无需 Node 构建）
     config.py               配置分层与校验（含各类型大小上限）
     db.py                   SQLite 连接、PRAGMA、迁移执行
     models.py               数据模型（表结构）
@@ -97,6 +98,27 @@ uv run ruff check .           # 静态检查
 
 Windows 上开发只用于跑测试与命令行，`/var/lib/ctrlstore` 这类默认值当然不可用，测试一律把数据目录指到临时目录。
 生产以 Debian 13 + Python 3.13 为准。
+
+## 管理端
+
+管理端是 API 进程直接提供的单页应用，不需要 Node 构建，也没有独立开发服务器：
+
+```text
+http://127.0.0.1:8000/admin/
+```
+
+- 使用所有者或编辑账号登录；会话走 HttpOnly Cookie，所有写请求自动带 `X-CSRF-Token`。
+- 已接入总览、内容库、内容详情、Markdown 编辑、分片上传、集合、站点与令牌、账号与权限、回收站、系统状态。
+- 内容预览走 `/api/admin/v1/assets/{id}/preview`，卡片缩略图走 `/thumb`；都要求 `asset.read`，不把 `originals/` 暴露成静态目录。
+- Markdown / 纯文本正文通过 `/assets/{id}/body` 读回当前版本；保存正文仍走 `PATCH /assets/{id}`，生成新版本。
+- 编辑器将未保存的正文提交到 `POST /assets/{id}/render`，与公开 HTML 共用 Markdown 与 nh3 消毒；公开图片使用绝对原图地址，仅站点图片使用短时签名地址，不可用图片显示缺失标记。
+- 大文件上传按 4 MiB 分片；临时失败自动重试两次，队列中的「重试失败分片」会保留会话并跳过已成功上传的分片。编辑保存遇到 409 会提示并重新加载最新正文与修订号。
+- 系统状态里的后台任务与审计日志是只读视图；`fsck`、停写备份与恢复仍在服务器维护窗口用命令行执行。
+- 首次使用先执行 `ctrlstore init` 创建所有者。管理端登录失败同样受账号 + IP 限速，失败会写入审计日志。
+
+生产若在 Nginx 后面，`deploy/nginx/ctrlstore.conf.example` 已将 `/admin/` 反代到 API 进程。
+
+界面总览：[docs/admin-ui/overview.png](docs/admin-ui/overview.png)。完整页面截图在 [`docs/admin-ui/`](docs/admin-ui/)。
 
 ## 配置
 
@@ -198,6 +220,9 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | POST | `/api/admin/v1/assets/{id}/restore` | `asset.trash`；恢复，不自动公开 |
 | DELETE | `/api/admin/v1/assets/{id}` | 所有者；彻底删除（须已在回收站） |
 | GET | `/api/admin/v1/assets/{id}/file` | `asset.read`；任意状态下载原件（支持 Range） |
+| GET | `/api/admin/v1/assets/{id}/preview` | `asset.read`；详情预览，优先派生图，图片可回退原图 |
+| GET | `/api/admin/v1/assets/{id}/thumb` | `asset.read`；只读已生成的缩略图/封面，不拿原图代替 |
+| GET | `/api/admin/v1/assets/{id}/body` | `asset.read`；读回 Markdown / 纯文本当前正文 |
 | GET | `/api/admin/v1/assets/{id}/signed-url` | `asset.read`；给已发布内容签短时地址 |
 | GET | `/api/admin/v1/collections` | `asset.read`；按别名排序 |
 | POST | `/api/admin/v1/collections` | `collection.manage`；建集合（别名如 `home.hero`） |
@@ -217,6 +242,8 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | GET | `/api/admin/v1/dashboard` | 所有者；今日、月份、近 12 个月与库存 |
 | GET | `/api/admin/v1/dashboard/day` | 所有者；某日的次数与最多 10 条路径 |
 | GET | `/api/admin/v1/search` | `asset.read`；三字以上全文，一两个字查标题/文件名/标签 |
+| GET | `/api/admin/v1/jobs` | 所有者；最近后台任务，供系统状态页只读展示 |
+| GET | `/api/admin/v1/audit` | 所有者；最近审计记录，供系统状态页只读展示 |
 | GET | `/api/admin/v1/health` | 所有者；磁盘、队列、迁移版本与上次成功备份 |
 | GET | `/api/public/v1/search` | 站点令牌且配置开启；只搜已发布且该站点能读的内容 |
 

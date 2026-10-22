@@ -28,11 +28,12 @@ INSUFFICIENT_STORAGE = "insufficient_storage"
 class ApiError(Exception):
     """带稳定错误码的失败。"""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(self, status_code: int, code: str, message: str, *, details: dict | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.details = details
 
     @classmethod
     def unauthorized(cls, message: str = "请先登录") -> ApiError:
@@ -47,8 +48,8 @@ class ApiError(Exception):
         return cls(404, NOT_FOUND, message)
 
     @classmethod
-    def conflict(cls, message: str) -> ApiError:
-        return cls(409, CONFLICT, message)
+    def conflict(cls, message: str, *, details: dict | None = None) -> ApiError:
+        return cls(409, CONFLICT, message, details=details)
 
     @classmethod
     def invalid(cls, message: str) -> ApiError:
@@ -76,9 +77,12 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ApiError)
     async def _handle_api_error(_request: Request, exc: ApiError) -> JSONResponse:
+        error = {"code": exc.code, "message": exc.message}
+        if exc.details is not None:
+            error["details"] = exc.details
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content={"error": error},
             headers={"Cache-Control": "no-store"} if exc.status_code == 401 else None,
         )
 

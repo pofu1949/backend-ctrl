@@ -130,6 +130,11 @@ def test_today_numbers_and_deltas(
     )[1]
     assert len(body["months"]) == 12
     assert body["months"][-1]["month"] == body["month"]["month"]
+    # 近 12 个月必须按时间正序，且首项早于当前月；不能把未来月份当成历史。
+    assert [row["month"] for row in body["months"]] == sorted(
+        row["month"] for row in body["months"]
+    )
+    assert body["months"][0]["month"] < body["months"][-1]["month"]
 
 
 def test_requested_month_and_invalid_month(

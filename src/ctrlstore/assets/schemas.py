@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..models import Asset, AssetVersion
 
 
+class RenderBodyRequest(BaseModel):
+    body: str
+
+
 class TagRefOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -79,6 +83,8 @@ class AssetOut(BaseModel):
     published_slug: str | None = None
     #: 定时发布的时间。到点前不写快照，也不进公开区。
     publish_at: datetime | None = None
+    #: 进入回收站的时间；恢复或未删除时为空。管理端据此显示保留窗口。
+    trashed_at: datetime | None = None
     tags: list[TagRefOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -103,6 +109,7 @@ class AssetOut(BaseModel):
             published_version_id=asset.published_version_id,
             published_slug=asset.published_slug,
             publish_at=asset.publish_at,
+            trashed_at=asset.trashed_at,
             tags=[TagRefOut.model_validate(tag) for tag in asset.tags],
             created_at=asset.created_at,
             updated_at=asset.updated_at,

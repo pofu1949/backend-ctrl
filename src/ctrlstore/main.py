@@ -11,12 +11,16 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import sessionmaker
 
 from . import __version__
 from .admin_api import router as admin_router
+from .admin_ui import ASSETS_DIR, INDEX_HTML
 from .auth.throttle import LoginThrottle
 from .config import Settings, load_settings
 from .db import create_engine, run_migrations
@@ -33,6 +37,21 @@ ADMIN_PREFIX = "/api/admin/v1"
 
 #: 公开接口前缀。
 PUBLIC_PREFIX = "/api/public/v1"
+
+#: 管理端页面的安全头。脚本与样式都从本进程的 /admin/assets 加载，
+#: 不引入 CDN；内联样式只用于模板里的布局微调，因此 style-src 放开 inline。
+ADMIN_CSP = (
+    "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+    "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+    "connect-src 'self'; font-src 'self'"
+)
+ADMIN_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+    "Content-Security-Policy": ADMIN_CSP,
+}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -79,6 +98,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(admin_router, prefix=ADMIN_PREFIX)
     app.include_router(public_router, prefix=PUBLIC_PREFIX)
+
+    # 管理端是同一进程提供的单页应用。静态资源只有 CSS / JS 两份，
+    # HTML 不内联数据；未登录时页面只显示登录框，真实数据仍由 /api/admin 保护。
+    app.mount("/admin/assets", StaticFiles(directory=ASSETS_DIR), name="admin-assets")
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/admin/", status_code=308)
+
+    @app.get("/admin/", include_in_schema=False)
+    def admin_page() -> FileResponse:
+        # 公开文件可放在独立域名；只放行配置指定的源，外站图片仍由渲染器移除。
+        public = urlsplit(settings.public_base_url)
+        image_origin = f"{public.scheme}://{public.netloc}"
+        headers = {
+            **ADMIN_HEADERS,
+            "Content-Security-Policy": ADMIN_CSP.replace(
+                "img-src 'self' data: blob:", f"img-src 'self' data: blob: {image_origin}"
+            ),
+        }
+        return FileResponse(
+            INDEX_HTML,
+            media_type="text/html; charset=utf-8",
+            headers=headers,
+        )
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

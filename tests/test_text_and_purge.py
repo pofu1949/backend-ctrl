@@ -266,3 +266,14 @@ def test_purge_reports_cover_and_collection_together(owner_client: TestClient) -
     message = response.json()["error"]["message"]
     assert "封面" in message
     assert "blog.covers" in message
+    references = response.json()["error"]["details"]["references"]
+    assert references["covers"] == [
+        {
+            "id": article["id"],
+            "title": article["title"],
+            "current": True,
+            "published": False,
+        }
+    ]
+    assert references["collections"][0]["id"] == collection["id"]
+    assert references["collections"][0]["slug"] == "blog.covers"

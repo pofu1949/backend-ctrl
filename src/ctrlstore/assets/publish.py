@@ -206,9 +206,7 @@ def publish(
     return asset
 
 
-def schedule(
-    db: DbSession, *, asset: Asset, revision: int, actor: User, when: datetime
-) -> Asset:
+def schedule(db: DbSession, *, asset: Asset, revision: int, actor: User, when: datetime) -> Asset:
     """排一个定时发布。到点前不写快照、不碰公开区（企划第 8.6 节 P0-7）。
 
     只改 ``publish_at`` 与修订号：标题、正文、可见性都留到真正发布的那一刻再取，
@@ -269,9 +267,7 @@ def publish_due(
     return published, failed
 
 
-def link_derivative(
-    *, db: DbSession, storage: LocalStorage, derivative: Derivative
-) -> bool:
+def link_derivative(*, db: DbSession, storage: LocalStorage, derivative: Derivative) -> bool:
     """缩略图生成完成后补进公开区。返回是否真的建了链接。
 
     只补「现在就应该在公开区」的那一版：已发布、可见性为公开或未列出，且它就是
@@ -403,30 +399,48 @@ def purge(db: DbSession, *, storage: LocalStorage, asset: Asset, actor: User | N
     if asset.status != ASSET_TRASHED:
         raise ApiError.conflict("只有回收站中的内容可以彻底删除")
 
-    covers = sorted(
-        db.scalars(
-            select(Asset.id).where(
-                # 编辑中与已发布的封面都要算：任一仍指向它就不能删。
-                (Asset.cover_asset_id == asset.id) | (Asset.published_cover_asset_id == asset.id),
-                Asset.id != asset.id,
-            )
-        ).all()
-    )
-    collections = sorted(
-        db.scalars(
-            select(Collection.slug)
-            .join(CollectionItem, CollectionItem.collection_id == Collection.id)
-            .where(CollectionItem.asset_id == asset.id)
-        ).all()
-    )
+    cover_assets = db.scalars(
+        select(Asset)
+        .where(
+            (Asset.cover_asset_id == asset.id) | (Asset.published_cover_asset_id == asset.id),
+            Asset.id != asset.id,
+        )
+        .order_by(Asset.id)
+    ).all()
+    covers = [item.id for item in cover_assets]
+    collection_refs = db.scalars(
+        select(Collection)
+        .join(CollectionItem, CollectionItem.collection_id == Collection.id)
+        .where(CollectionItem.asset_id == asset.id)
+        .order_by(Collection.slug)
+    ).all()
+    collections = [item.slug for item in collection_refs]
     if covers or collections:
         reasons = []
         if covers:
             reasons.append("仍有内容把它当封面：" + ", ".join(covers))
         if collections:
             reasons.append("仍属于这些集合：" + ", ".join(collections))
-        raise ApiError.conflict("先解除引用再删除（" + "；".join(reasons) + "）")
-
+        raise ApiError.conflict(
+            "先解除引用再删除（" + "；".join(reasons) + "）",
+            details={
+                "references": {
+                    "covers": [
+                        {
+                            "id": item.id,
+                            "title": item.title,
+                            "current": item.cover_asset_id == asset.id,
+                            "published": item.published_cover_asset_id == asset.id,
+                        }
+                        for item in cover_assets
+                    ],
+                    "collections": [
+                        {"id": item.id, "title": item.title, "slug": item.slug}
+                        for item in collection_refs
+                    ],
+                }
+            },
+        )
     for version in list(asset.versions):
         derivatives.discard_for_version(db, storage=storage, version=version)
         storage.discard_original(version.storage_key)

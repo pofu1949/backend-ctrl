@@ -88,7 +88,11 @@ class Rendered:
 
 
 def render(
-    body: str, *, image_url: Callable[[str], str | None], base_url: str | None = None
+    body: str,
+    *,
+    image_url: Callable[[str], str | None],
+    base_url: str | None = None,
+    mark_missing_images: bool = False,
 ) -> Rendered:
     """把 Markdown 渲染成消毒后的 HTML。
 
@@ -110,7 +114,7 @@ def render(
         return url
 
     html = markdown_lib.markdown(body, extensions=["extra", "sane_lists", "fenced_code"])
-    html = _rewrite_image_sources(html, resolve)
+    html = _rewrite_image_sources(html, resolve, mark_missing=mark_missing_images)
     if base_url:
         html = _absolutise_links(html, base_url.rstrip("/"))
     cleaned = nh3.clean(
@@ -150,7 +154,9 @@ def excerpt(body: str, limit: int = 160) -> str:
     return text[:limit]
 
 
-def _rewrite_image_sources(html: str, resolve: Callable[[str], str | None]) -> str:
+def _rewrite_image_sources(
+    html: str, resolve: Callable[[str], str | None], *, mark_missing: bool = False
+) -> str:
     """把图片地址统一换成公开地址。
 
     认两种写法：``asset:<id>``（nh3 不认这个协议，必须先换掉）与
@@ -158,16 +164,19 @@ def _rewrite_image_sources(html: str, resolve: Callable[[str], str | None]) -> s
     后面按"不是本库地址"整张去掉。
     """
 
-    def replace(match: re.Match[str]) -> str:
-        value = match.group(1).strip()
+    def replace_tag(tag: re.Match[str]) -> str:
+        source = _SRC.search(tag.group(0))
+        if source is None:
+            return tag.group(0)
+        value = html_unescape(source.group(1)).strip()
         asset_id = _asset_id_of(value)
         if asset_id is None:
-            return match.group(0)
+            return tag.group(0)
         url = resolve(asset_id)
-        return f'src="{url}"' if url else 'src="#unavailable"'
-
-    def replace_tag(tag: re.Match[str]) -> str:
-        return _SRC.sub(replace, tag.group(0))
+        if not url and mark_missing:
+            return f"<span>图片缺失（未发布或不可用）：{html_escape(asset_id)}</span>"
+        replacement = f'src="{html_escape(url, quote=True)}"' if url else 'src="#unavailable"'
+        return _SRC.sub(lambda _: replacement, tag.group(0))
 
     return _IMG_TAG.sub(replace_tag, html)
 

@@ -170,7 +170,8 @@ def _month_days(db: DbSession, month: str) -> list[dict]:
 def _recent_months(db: DbSession, today: str) -> list[dict]:
     """近 12 个月（含本月）的「每日独立访客按月相加」。"""
     current = date.fromisoformat(today).replace(day=1)
-    months = [_shift_month(current, offset) for offset in range(MONTH_WINDOW - 1, -1, -1)]
+    # 负偏移才是过去：range(11, -1, -1) 会从“11 个月后”倒着排到今天。
+    months = [_shift_month(current, offset) for offset in range(-(MONTH_WINDOW - 1), 1)]
     first = months[0].strftime("%Y-%m")
     rows = db.execute(
         select(func.substr(PageviewDaily.day, 1, 7), func.sum(PageviewDaily.uv))

@@ -18,6 +18,7 @@ from fastapi import Request
 from ..assets import derivatives, publish, signing
 from ..content import markdown_render
 from ..models import (
+    ASSET_PUBLISHED,
     PUBLIC_DERIVATIVE_PURPOSES,
     VISIBILITY_SITE,
     Asset,
@@ -209,17 +210,27 @@ def render_markdown(
         image = images.get(asset_id)
         if image is None:
             return None
-        version = publish.published_version(image)
-        if version is None:
-            return None
-        urls = file_urls(request, image, site=site)
-        return urls.get("original") or urls.get("signed")
+        return published_image_url(request, image)
 
     return markdown_render.render(
         body,
         image_url=image_url,
         base_url=request.app.state.settings.public_base_url,
     )
+
+
+def published_image_url(request: Request, image: Asset) -> str | None:
+    """供公开正文与管理预览共用；调用方先验证读取权限。只使用已发布原件。"""
+    if image.kind != "image" or image.status != ASSET_PUBLISHED:
+        return None
+    version = publish.published_version(image)
+    if version is None:
+        return None
+    if publish.desired_links(image) is not None:
+        return original_url(request, image, version)
+    if image.visibility == VISIBILITY_SITE:
+        return signed_url(request, image, version)
+    return None
 
 
 def published_reference_ids(asset: Asset) -> set[str]:

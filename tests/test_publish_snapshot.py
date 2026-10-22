@@ -428,3 +428,8 @@ def test_purge_blocks_published_cover(owner_client: TestClient) -> None:
 
     assert response.status_code == 409
     assert "封面" in response.json()["error"]["message"]
+    covers = response.json()["error"]["details"]["references"]["covers"]
+    assert len(covers) == 1
+    assert covers[0]["id"] == article["id"]
+    assert covers[0]["current"] is False
+    assert covers[0]["published"] is True
