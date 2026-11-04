@@ -11,12 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
 from ..auth import deps as auth_deps
-from ..collections.service import prefix_matches
 from ..errors import ApiError
 from ..models import Asset, Section, Site
 from ..sections.service import decode_cursor, encode_cursor
 from ..sections.template import FieldSpec
-from ..sections.validation import asset_ids, get_template, validate_meta
+from ..sections.validation import asset_ids, get_template, prefix_matches, validate_meta
 from . import deps, payloads
 
 router = APIRouter(tags=["public sections"])
@@ -112,6 +111,13 @@ def _payload(
     assets: dict[str, Asset],
 ) -> dict[str, Any]:
     body = json.loads(section.published_body or "{}")
+    template = get_template(section.published_template)
+    if template.shape == "text":
+        value = body if isinstance(body, str) else ""
+        fields = None
+    else:
+        value = None
+        fields = _render_fields(request, db, section.published_template, body, assets, site)
     return {
         "id": section.id,
         "slug": section.published_slug,
@@ -119,7 +125,8 @@ def _payload(
         "template": section.published_template,
         "title": section.published_title or "",
         "updated_at": _timestamp(section.published_at),
-        "fields": _render_fields(request, db, section.published_template, body, assets, site),
+        "value": value,
+        "fields": fields,
     }
 
 

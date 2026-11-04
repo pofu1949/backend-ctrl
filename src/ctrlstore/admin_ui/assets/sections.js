@@ -6,9 +6,14 @@ window.CtrlStoreSections = {
       section: null, doc: null, assets: {}, template: null, picker: null,
     };
     const view = () => document.querySelector('#view');
-    const canEdit = () => can('section.update');
+    const templateById = id => state.templates.find(item => item.id === id) || null;
+    const canEditTemplate = template => Boolean(template) && (can('section.update') || (template.access === 'copy' && can('entry.update')));
+    const canPublishTemplate = template => Boolean(template) && (can('section.publish') || (template.access === 'copy' && can('entry.publish')));
+    const canCreate = () => can('section.update') || can('entry.update');
+    const writableTemplates = () => state.templates.filter(item => can('section.update') || (item.access === 'copy' && can('entry.update')));
     const siteLabel = id => state.sites.find(site => site.id === id)?.name || (id ? id : '库级');
-    const templateLabel = id => state.templates.find(item => item.id === id)?.label || id || '';
+    const templateLabel = id => templateById(id)?.label || id || '';
+    const bodyPreview = body => typeof body === 'string' ? body : (body?.title || '');
 
     function crumb(text) {
       const node = document.querySelector('#crumb');
@@ -54,17 +59,17 @@ window.CtrlStoreSections = {
 
     function listHTML() {
       const filters = state.filters;
-      const actions = canEdit()
-        ? '<button class="btn secondary sm" type="button" data-section-action="example">用费用说明示例</button><button class="btn primary sm" type="button" data-section-action="new">新建区块</button>'
+      const actions = canCreate()
+        ? `${can('section.update') ? '<button class="btn secondary sm" type="button" data-section-action="example">用费用说明示例</button>' : ''}<button class="btn primary sm" type="button" data-section-action="new">新建区块</button>`
         : '';
       const rows = state.rows.length ? state.rows.map(row => `<tr>
         <td><b class="mono">${esc(row.slug)}</b><div>${esc(row.language)} · ${esc(templateLabel(row.template))}</div></td>
-        <td>${esc(row.title || '未命名')}<div>${esc(row.body?.title || '')}</div></td>
+        <td>${esc(row.title || '未命名')}<div>${esc(bodyPreview(row.body))}</div></td>
         <td>${esc(siteLabel(row.site_id))}<div>${row.visibility === 'site' ? '仅站点' : '公开'}</div></td>
         <td><span class="pill ${row.status === 'published' ? 'published' : 'draft'}">${row.status === 'published' ? '已发布' : '草稿'}</span></td>
-        <td><button class="btn secondary xs" type="button" data-section-action="open" data-id="${esc(row.id)}">${canEdit() ? '编辑' : '查看'}</button></td>
+        <td><button class="btn secondary xs" type="button" data-section-action="open" data-id="${esc(row.id)}">${canEditTemplate(templateById(row.template)) ? '编辑' : '查看'}</button></td>
       </tr>`).join('') : '<tr><td colspan="5"><div class="inline-note">还没有区块。可以用费用说明示例看一层字段怎么落到页面上。</div></td></tr>';
-      return `<div class="page-head"><div><div class="eyebrow">SECTIONS / 区块</div><h1>一页一层字段</h1><p class="desc">每个区块是一棵固定形状的字段树。文字和配图先存成草稿，发布后网站一次读取整棵树。</p></div><div class="actions">${actions}</div></div>
+      return `<div class="page-head"><div><div class="eyebrow">SECTIONS / 区块</div><h1>版式、短句和读者</h1><p class="desc">页面区块按模板填字段。文案区块只有一段文字，别名就是读取键。读者名单决定哪些站点能读本区块引用的仅站点素材。</p></div><div class="actions">${actions}</div></div>
         <form class="entry-filters" data-section-form="filter"><label>语言<input class="input" name="language" value="${esc(filters.language || '')}" placeholder="全部语言，例如 zh-CN"></label><label>别名前缀<input class="input" name="prefix" value="${esc(filters.prefix || '')}" placeholder="例如 pricing"></label><label>状态<select class="select" name="status"><option value="">全部状态</option><option value="draft" ${filters.status === 'draft' ? 'selected' : ''}>草稿</option><option value="published" ${filters.status === 'published' ? 'selected' : ''}>已发布</option></select></label><button class="btn secondary sm" type="submit">筛选</button></form>
         <div class="table-wrap"><table class="data-table entry-table"><thead><tr><th>别名</th><th>名称 / 主标题</th><th>归属</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
         ${state.cursor ? '<div class="entry-more"><button class="btn secondary sm" type="button" data-section-action="more">加载更多</button></div>' : ''}`;
@@ -91,14 +96,21 @@ window.CtrlStoreSections = {
 
     function editorHTML() {
       const row = state.section;
-      const readOnly = !canEdit();
+      const readOnly = !canEditTemplate(state.template);
       const disabled = readOnly ? 'disabled' : '';
       const sites = state.sites.map(site => `<option value="${esc(site.id)}" ${row.site_id === site.id ? 'selected' : ''}>${esc(site.name || site.key)}</option>`).join('');
-      const publishButtons = can('section.publish') && row
+      const selectedReaders = new Set(row.reader_ids || []);
+      const readers = state.sites.length
+        ? state.sites.map(site => `<label class="check-row"><input type="checkbox" name="reader_ids" value="${esc(site.id)}" ${selectedReaders.has(site.id) ? 'checked' : ''} ${disabled}>${esc(site.name || site.key)}</label>`).join('')
+        : '<div class="inline-note">还没有站点。建好站点后，可以在这里指定谁能读仅站点素材。</div>';
+      const publishButtons = canPublishTemplate(state.template) && row
         ? `${row.status === 'published' ? '<button class="btn secondary sm" type="button" data-section-action="unpublish">撤回</button>' : ''}<button class="btn secondary sm" type="button" data-section-action="publish">发布已保存草稿</button>`
         : '';
+      const fill = canEditTemplate(state.template) && state.template?.id === 'stack'
+        ? '<button class="btn secondary sm" type="button" data-section-action="fill">填入费用说明示例</button>'
+        : '';
       return `<div class="page-head"><div><div class="eyebrow">SECTION / ${esc(templateLabel(row.template))}</div><h1>${esc(row.title || row.slug)}</h1><p class="desc">修订号 ${esc(row.revision)}。保存只改草稿；网站读取 <span class="mono">GET /api/public/v1/sections/${esc(row.slug)}</span></p></div>
-        <div class="actions"><button class="btn ghost sm" type="button" data-section-action="back">返回列表</button>${canEdit() ? '<button class="btn secondary sm" type="button" data-section-action="fill">填入费用说明示例</button><button class="btn primary sm" type="submit" form="sectionForm">保存草稿</button>' : ''}${publishButtons}${isOwner() && row.status === 'draft' ? `<button class="btn ghost sm danger-link" type="button" data-section-action="delete">删除</button>` : ''}</div></div>
+        <div class="actions"><button class="btn ghost sm" type="button" data-section-action="back">返回列表</button>${fill}${canEditTemplate(state.template) ? '<button class="btn primary sm" type="submit" form="sectionForm">保存草稿</button>' : ''}${publishButtons}${isOwner() && row.status === 'draft' ? `<button class="btn ghost sm danger-link" type="button" data-section-action="delete">删除</button>` : ''}</div></div>
         <form id="sectionForm" class="section-editor" data-section-form="save">
             <div class="form-error" role="alert"></div>
             <div class="field-grid">
@@ -109,7 +121,8 @@ window.CtrlStoreSections = {
               <div class="field"><label for="sectionTitle">管理名称</label><input id="sectionTitle" class="input" name="title" value="${esc(row.title)}" maxlength="255" ${disabled}></div>
               <div class="field"><label for="sectionVisibility">可见性</label><select id="sectionVisibility" class="select" name="visibility" ${disabled}><option value="public" ${row.visibility !== 'site' ? 'selected' : ''}>公开</option><option value="site" ${row.visibility === 'site' ? 'selected' : ''}>仅站点</option></select></div>
             </div>
-            <div class="field"><label for="sectionSite">所属站点</label><select id="sectionSite" class="select" name="site_id" ${disabled}><option value="">库级</option>${sites}</select><div class="field-help">库级公开区块可匿名读取。指定站点后只有该站点能读。同别名时本站覆盖库级。</div></div>
+            <div class="field"><label for="sectionSite">所属站点</label><select id="sectionSite" class="select" name="site_id" ${disabled}><option value="">库级</option>${sites}</select><div class="field-help">库级公开区块可匿名读取。指定站点后只有该站点能打开这个区块。同别名时本站覆盖库级。</div></div>
+            <div class="field"><label>读者名单</label><div class="check-grid">${readers}</div><div class="field-help">发布后，这些站点才能读取本区块引用的仅站点素材。名单不写进正文。</div></div>
             <div id="sectionFields" class="section-fields"></div>
           </form>
           <aside class="section-preview" id="sectionPreview"></aside>`;
@@ -118,7 +131,11 @@ window.CtrlStoreSections = {
     function paintFields() {
       const root = document.querySelector('#sectionFields');
       if (!root || !state.template) return;
-      const readOnly = !canEdit();
+      const readOnly = !canEditTemplate(state.template);
+      if (state.template.shape === 'text') {
+        root.innerHTML = `<div class="field"><label for="sectionCopy">正文</label><textarea id="sectionCopy" class="textarea" data-section-path="" rows="6" maxlength="${state.template.max_length || 2000}" ${readOnly ? 'disabled' : ''}>${esc(state.doc || '')}</textarea><div class="field-help">纯文本，最多 ${state.template.max_length || 2000} 字。别名就是网站读取的键。</div></div>`;
+        return;
+      }
       root.innerHTML = state.template.fields.map(field => fieldHTML(field, state.doc[field.key], field.key, readOnly)).join('');
       bindPreviews(root);
     }
@@ -167,7 +184,12 @@ window.CtrlStoreSections = {
 
     function paintPreview() {
       const root = document.querySelector('#sectionPreview');
-      if (!root || !state.doc) return;
+      if (!root || state.doc == null) return;
+      const endpoint = `${location.origin}/api/public/v1/sections/${encodeURIComponent(state.section?.slug || '')}?language=${encodeURIComponent(state.section?.language || 'zh-CN')}`;
+      if (state.template?.shape === 'text') {
+        root.innerHTML = `<div class="fee-sheet"><div class="fee-kicker">文案</div><h2 class="fee-title">${esc(state.section?.slug || '')}</h2><p class="fee-lead">${esc(state.doc || '（空）')}</p><p class="fee-note">发布后，网站按别名读取这一段文字。</p><p class="fee-note"><a href="${esc(endpoint)}" target="_blank" rel="noopener">${esc(endpoint)}</a></p></div>`;
+        return;
+      }
       const doc = state.doc;
       const gallery = (doc.gallery || []).map(id => previewMedia(id)).join('')
         || '<div class="ph">配图会出现在这里</div><div class="ph">从内容库选择图片或视频</div>';
@@ -175,7 +197,6 @@ window.CtrlStoreSections = {
       const first = points[0] ? pointHTML(points[0]) : '<div class="inline-note">第一张下级卡片会出现在左侧。</div>';
       const rest = points.slice(1).map(point => pointHTML(point)).join('')
         || '<div class="inline-note">其余下级卡片会出现在右侧。</div>';
-      const endpoint = `${location.origin}/api/public/v1/sections/${encodeURIComponent(state.section?.slug || '')}?language=${encodeURIComponent(state.section?.language || 'zh-CN')}`;
       root.innerHTML = `<div class="fee-sheet">
         <div class="fee-legend"><span class="is-title">主标题</span><span class="is-lead">导语</span><span class="is-point">下级卡片</span><span class="is-body">卡片正文</span></div>
         <div class="fee-kicker">${esc(doc.eyebrow || '眉题')}</div>
@@ -227,9 +248,14 @@ window.CtrlStoreSections = {
       });
     }
 
+    function readReaders(form) {
+      return [...form.querySelectorAll('input[name="reader_ids"]:checked')].map(input => input.value);
+    }
+
     function pullFields() {
       document.querySelectorAll('[data-section-path]').forEach(input => {
-        assign(state.doc, input.dataset.sectionPath, input.value);
+        if (input.dataset.sectionPath === '') state.doc = input.value;
+        else assign(state.doc, input.dataset.sectionPath, input.value);
       });
     }
 
@@ -267,9 +293,13 @@ window.CtrlStoreSections = {
       await Promise.all([loadTemplates(), loadSites()]);
       if (!isActive()) return;
       const sites = state.sites.map(site => `<option value="${esc(site.id)}">${esc(site.name || site.key)}</option>`).join('');
+      const choices = writableTemplates();
+      const preferred = choices.find(item => item.id === 'stack') || choices[0];
+      const options = choices.map(item => `<option value="${esc(item.id)}" ${item.id === preferred?.id ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+      const readers = state.sites.map(site => `<label class="check-row"><input type="checkbox" name="reader_ids" value="${esc(site.id)}">${esc(site.name || site.key)}</label>`).join('');
       openModal({
         kicker: 'Section / 区块', title: '新建区块', wide: true,
-        body: `<form id="sectionCreateForm" data-section-form="create"><div class="form-error" role="alert"></div><div class="field"><label>别名</label><input class="input mono" name="slug" required maxlength="128" placeholder="pricing.fee" pattern="[a-z0-9]+(([.]|-)[a-z0-9]+)*"></div><div class="field"><label>管理名称</label><input class="input" name="title" maxlength="255" placeholder="费用如何确定"></div><div class="field-grid"><div class="field"><label>语言</label><input class="input" name="language" value="zh-CN" required maxlength="32"></div><div class="field"><label>可见性</label><select class="select" name="visibility"><option value="public">公开</option><option value="site">仅站点</option></select></div></div><div class="field"><label>所属站点</label><select class="select" name="site_id"><option value="">库级</option>${sites}</select></div><input type="hidden" name="template" value="stack"></form>`,
+        body: `<form id="sectionCreateForm" data-section-form="create"><div class="form-error" role="alert"></div><div class="field"><label>别名</label><input class="input mono" name="slug" required maxlength="128" placeholder="nav.about" pattern="[a-z0-9]+(([.]|-)[a-z0-9]+)*"></div><div class="field"><label>管理名称</label><input class="input" name="title" maxlength="255" placeholder="关于我们"></div><div class="field-grid"><div class="field"><label>语言</label><input class="input" name="language" value="zh-CN" required maxlength="32"></div><div class="field"><label>可见性</label><select class="select" name="visibility"><option value="public">公开</option><option value="site">仅站点</option></select></div></div><div class="field"><label>模板</label><select class="select" name="template">${options}</select></div><div class="field"><label>所属站点</label><select class="select" name="site_id"><option value="">库级</option>${sites}</select></div><div class="field"><label>文案正文</label><textarea class="textarea" name="value" rows="4" maxlength="2000" placeholder="文案模板才使用这段文字"></textarea></div><div class="field"><label>读者名单</label><div class="check-grid">${readers || '<div class="inline-note">还没有站点。</div>'}</div></div></form>`,
         footer: '<button class="btn secondary sm" type="button" data-close-modal>取消</button><button class="btn primary sm" type="submit" form="sectionCreateForm">创建草稿</button>',
       });
     }
@@ -310,6 +340,7 @@ window.CtrlStoreSections = {
       const fields = readMeta(form);
       fields.revision = state.section.revision;
       fields.body = state.doc;
+      fields.reader_ids = readReaders(form);
       const row = await api(`/sections/${encodeURIComponent(id)}`, { method: 'PATCH', body: fields });
       toast('区块草稿已保存。网站仍读取已发布的版本');
       state.section = row;
@@ -329,9 +360,12 @@ window.CtrlStoreSections = {
       const row = await api(`/sections/${encodeURIComponent(id)}`);
       const form = document.querySelector('#sectionForm');
       const meta = form ? readMeta(form) : null;
+      const readersNow = form ? readReaders(form).slice().sort().join(',') : '';
+      const readersSaved = (row.reader_ids || []).slice().sort().join(',');
       const dirty = meta && (
         meta.slug !== row.slug || meta.language !== row.language || meta.title !== row.title
         || meta.visibility !== row.visibility || (meta.site_id || null) !== (row.site_id || null)
+        || readersNow !== readersSaved
         || JSON.stringify(state.doc) !== JSON.stringify(row.body)
       );
       const labels = { publish: '发布', unpublish: '撤回', delete: '删除' };
@@ -390,8 +424,12 @@ window.CtrlStoreSections = {
           await renderList();
         } else if (form.dataset.sectionForm === 'create') {
           const fields = Object.fromEntries(new FormData(form));
+          const template = state.templates.find(item => item.id === fields.template);
           fields.site_id = fields.site_id || null;
           fields.title = fields.title || fields.slug;
+          fields.reader_ids = readReaders(form);
+          if (template?.shape === 'text') fields.body = fields.value || '';
+          delete fields.value;
           const row = await api('/sections', { method: 'POST', body: fields });
           closeModal();
           toast('区块草稿已创建');
@@ -408,8 +446,9 @@ window.CtrlStoreSections = {
 
     document.addEventListener('input', event => {
       const input = event.target.closest('[data-section-path]');
-      if (!input || !isActive() || !state.doc) return;
-      assign(state.doc, input.dataset.sectionPath, input.value);
+      if (!input || !isActive() || state.doc == null) return;
+      if (input.dataset.sectionPath === '') state.doc = input.value;
+      else assign(state.doc, input.dataset.sectionPath, input.value);
       paintPreview();
     });
 

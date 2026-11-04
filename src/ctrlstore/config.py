@@ -134,9 +134,9 @@ class Settings(BaseSettings):
     #: 全库内容条数配额。
     library_quota_items: int = 0
 
-    #: 文案独立计数，不占内容条数或字节配额。
+    #: 文案区块条数上限。和页面区块分开计数，不占内容条数或字节配额。
     entry_limit: int = Field(default=2000, ge=1)
-    #: 区块独立计数，不占内容条数或字节配额。
+    #: 页面区块条数上限，不含文案区块。
     section_limit: int = Field(default=500, ge=1)
 
     # —— 运维（第 9 部分）——

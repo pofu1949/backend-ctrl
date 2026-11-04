@@ -158,6 +158,27 @@ class Section(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class SectionReader(Base):
+    """区块的读者名单。和正文分开存，草稿与发布快照各一份。
+
+    站点能不能读「仅站点」素材，只看已发布区块的这份名单，不看模板里的字段。
+    """
+
+    __tablename__ = "section_readers"
+    __table_args__ = (
+        UniqueConstraint("section_id", "site_id", "published", name="ux_section_reader"),
+        Index("ix_section_readers_site", "site_id", "published"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id", ondelete="CASCADE"), index=True
+    )
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), index=True)
+    #: 假表示编辑中的名单，真表示已经随区块发布的名单。
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class User(Base):
     """账号。所有者与编辑各一行，角色不能通过接口修改。"""
 

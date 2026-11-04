@@ -9,7 +9,6 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from .assets import router as assets_router
-from .collections import router as collections_router
 from .entries import router as entries_router
 from .files import router as files_router
 from .pageviews import router as pageviews_router
@@ -17,7 +16,7 @@ from .search import router as search_router
 from .sections import router as sections_router
 
 router = APIRouter()
-router.include_router(collections_router)
+# 网站按区块别名读取。集合不再作为公开主路径；旧表仍保留，管理端仍可查看。
 router.include_router(entries_router)
 router.include_router(sections_router)
 router.include_router(assets_router)

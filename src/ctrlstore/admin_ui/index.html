@@ -90,9 +90,7 @@
       <button class="nav-item" data-route="dashboard" data-owner="1"><svg class="icon"><use href="#i-home"/></svg><span>总览</span><span class="num">01</span></button>
       <button class="nav-item" data-route="library" data-perm="asset.read"><svg class="icon"><use href="#i-library"/></svg><span>内容库</span><span class="num">02</span></button>
       <button class="nav-item" data-route="upload" data-perm="asset.upload"><svg class="icon"><use href="#i-upload"/></svg><span>上传</span><span class="num">03</span></button>
-      <button class="nav-item" data-route="collections" data-perm="asset.read"><svg class="icon"><use href="#i-layers"/></svg><span>集合</span><span class="num">04</span></button>
-      <button class="nav-item" data-route="sections" data-perms-any="section.update,section.publish"><svg class="icon"><use href="#i-grid"/></svg><span>区块</span><span class="num">10</span></button>
-      <button class="nav-item" data-route="entries" data-perms-any="entry.update,entry.publish"><svg class="icon"><use href="#i-text"/></svg><span>文案</span><span class="num">09</span></button>
+      <button class="nav-item" data-route="sections" data-perms-any="section.update,section.publish,entry.update,entry.publish"><svg class="icon"><use href="#i-grid"/></svg><span>区块</span><span class="num">04</span></button>
     </div>
 
     <div class="nav-group">
@@ -133,7 +131,7 @@
       <div class="topbar-actions">
         <button class="top-search" id="openSearch" aria-label="搜索">
           <svg class="icon sm"><use href="#i-search"/></svg>
-          <span class="label">搜索内容、集合或页面</span>
+          <span class="label">搜索内容或页面</span>
           <span class="kbd">Ctrl K</span>
         </button>
         <div class="health-pill" id="healthPill"><span class="pulse"></span>CHECKING</div>
@@ -200,7 +198,7 @@
   <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
     <div class="search-field">
       <svg class="icon"><use href="#i-search"/></svg>
-      <input id="searchInput" placeholder="搜索内容、集合或页面…" autocomplete="off">
+      <input id="searchInput" placeholder="搜索内容或页面…" autocomplete="off">
       <span class="kbd">ESC</span>
     </div>
     <div class="search-results" id="searchResults"></div>
@@ -228,7 +226,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite"><svg class="icon"><use href="#i-check"/></svg><span id="toastText"></span></div>
 <noscript><div style="padding:30px">CtrlStore 管理端需要启用 JavaScript。</div></noscript>
 <script src="/admin/assets/entries.js?v=0.3.0"></script>
-<script src="/admin/assets/sections.js?v=0.4.1"></script>
-<script src="/admin/assets/admin.js?v=0.4.4"></script>
+<script src="/admin/assets/sections.js?v=0.5.0"></script>
+<script src="/admin/assets/admin.js?v=0.5.0"></script>
 </body>
 </html>

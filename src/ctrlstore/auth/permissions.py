@@ -1,7 +1,10 @@
-"""内容与文案的可授予能力。
+"""内容、文案区块与页面区块的可授予能力。
 
 所有者不读权限表，代码里直接视为拥有全部；编辑只拥有表里出现的键。
 能力清单集中在这里，新增能力只需要改这一处。
+
+``entry.*`` 只覆盖模板标明为文案的区块，不包含页面版式。
+``section.*`` 可以改任何区块。新增版式沿用 ``section.*``，不必改这里。
 """
 
 from __future__ import annotations
@@ -20,9 +23,9 @@ CONTENT_PERMISSIONS: tuple[str, ...] = (
     "tag.manage",
 )
 
-#: 命令行预设：一次授予全部八项。
+#: 文案区块的修改和发布。不授予页面版式。
 ENTRY_PERMISSIONS = ("entry.update", "entry.publish")
-#: 区块与文案一样，修改和发布分开，避免没审核的草稿进网站。
+#: 页面区块以及文案区块。修改和发布分开，避免没审核的草稿进网站。
 SECTION_PERMISSIONS = ("section.update", "section.publish")
 PERMISSIONS = CONTENT_PERMISSIONS + ENTRY_PERMISSIONS + SECTION_PERMISSIONS
 PRESET_EDITOR = frozenset(CONTENT_PERMISSIONS)

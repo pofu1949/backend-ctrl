@@ -53,25 +53,51 @@ def validate_meta(fields: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def empty_body(template_id: str) -> dict[str, Any]:
-    return _empty(get_template(template_id).fields)
+def empty_body(template_id: str) -> Any:
+    template = get_template(template_id)
+    if template.shape == "text":
+        return ""
+    return _empty(template.fields)
 
 
-def normalize(template_id: str, body: Any, *, strict: bool) -> dict[str, Any]:
+def normalize(template_id: str, body: Any, *, strict: bool) -> Any:
     """把正文收成模板规定的形状。
 
     ``strict`` 只在发布时打开：草稿允许主标题还空着，发布则不行。
+    文字模板的正文是字符串，对象模板的正文是字段。
     """
+    template = get_template(template_id)
+    if template.shape == "text":
+        return _text_body(template, body)
     if not isinstance(body, dict):
         raise ApiError.invalid("区块正文必须是对象")
-    return _object(get_template(template_id).fields, body, strict=strict)
+    return _object(template.fields, body, strict=strict)
 
 
-def asset_ids(template_id: str, body: dict[str, Any]) -> list[str]:
+def asset_ids(template_id: str, body: Any) -> list[str]:
     """按出现顺序收集图片、视频的内容 ID。同一张图可以在不同槽位各出现一次。"""
+    template = get_template(template_id)
+    if template.shape == "text" or not isinstance(body, dict):
+        return []
     found: list[str] = []
-    _walk(get_template(template_id).fields, body, found)
+    _walk(template.fields, body, found)
     return found
+
+
+def prefix_matches(prefix: str, slug: str) -> bool:
+    """按点号分段匹配：``home`` 覆盖 ``home.hero``，不覆盖 ``homepage``。"""
+    return slug == prefix or slug.startswith(f"{prefix}.")
+
+
+def _text_body(template: Template, body: Any) -> str:
+    if not isinstance(body, str):
+        raise ApiError.invalid("文案必须是纯文本")
+    if len(body) > template.text_max_length:
+        raise ApiError.too_large(f"文案最多 {template.text_max_length} 个 Unicode 字符")
+    _reject_controls(body, "文案", newlines=True)
+    if template.text_max_bytes and len(body.encode("utf-8")) > template.text_max_bytes:
+        raise ApiError.too_large(f"文案 UTF-8 编码最多 {template.text_max_bytes} 字节")
+    return body
 
 
 def _object(fields: tuple[FieldSpec, ...], body: dict[str, Any], *, strict: bool) -> dict[str, Any]:

@@ -27,8 +27,8 @@
     ['folder.manage', '管理目录'],
     ['collection.manage', '管理集合'],
     ['tag.manage', '管理标签'],
-    ['entry.update', '新建与修改文案'],
-    ['entry.publish', '发布与撤回文案'],
+    ['entry.update', '新建与修改文案区块'],
+    ['entry.publish', '发布与撤回文案区块'],
     ['section.update', '新建与修改区块'],
     ['section.publish', '发布与撤回区块'],
   ];
@@ -265,7 +265,7 @@
   });
   const sectionsUI = window.CtrlStoreSections.create({
     api, esc, can, isOwner, openModal, closeModal, confirmDialog, toast,
-    isActive: () => Boolean(state.me) && state.route === 'sections' && (can('section.update') || can('section.publish')),
+    isActive: () => Boolean(state.me) && state.route === 'sections' && (can('section.update') || can('section.publish') || can('entry.update') || can('entry.publish')),
   });
 
   /* ------------------------------------------------------------
@@ -331,8 +331,7 @@
     if (isOwner()) return 'dashboard';
     if (can('asset.read')) return 'library';
     if (can('asset.upload')) return 'upload';
-    if (can('entry.update') || can('entry.publish')) return 'entries';
-    if (can('section.update') || can('section.publish')) return 'sections';
+    if (can('entry.update') || can('entry.publish') || can('section.update') || can('section.publish')) return 'sections';
     return 'no-access';
   }
 
@@ -402,11 +401,11 @@
   function allowedRoute(name) {
     if (name === 'no-access') return true;
     if (['dashboard', 'sites', 'users', 'system'].includes(name)) return isOwner();
-    if (name === 'entries') return can('entry.update') || can('entry.publish');
-    if (name === 'sections') return can('section.update') || can('section.publish');
+    if (name === 'entries' || name === 'collections') return false;
+    if (name === 'sections') return can('section.update') || can('section.publish') || can('entry.update') || can('entry.publish');
     if (name === 'upload') return can('asset.upload');
     if (name === 'trash') return can('asset.trash');
-    if (['library', 'asset', 'editor', 'collections'].includes(name)) return can('asset.read');
+    if (['library', 'asset', 'editor'].includes(name)) return can('asset.read');
     return true;
   }
 
@@ -1019,7 +1018,7 @@
     const q = String(query || '').trim();
     const box = $('#searchResults');
     if (!q) {
-      const pages = [['总览', '页面 · 今日访问、日历与库藏', 'dashboard'], ['内容库', '页面 · 目录、标签与内容列表', 'library'], ['上传', '页面 · 分片上传与队列', 'upload'], ['集合', '页面 · 顺序与公开契约', 'collections'], ['区块', '页面 · 分层字段与配图', 'sections'], ['文案', '页面 · 短句草稿与发布', 'entries']].filter(([, , route]) => allowedRoute(route));
+      const pages = [['总览', '页面 · 今日访问、日历与库藏', 'dashboard'], ['内容库', '页面 · 目录、标签与内容列表', 'library'], ['上传', '页面 · 分片上传与队列', 'upload'], ['区块', '页面 · 版式、文案与读者名单', 'sections']].filter(([, , route]) => allowedRoute(route));
       box.innerHTML = `<div class="result-group-label">页面</div>${pages.map(([title, meta, route]) => `<button class="result-row" data-route="${route}"><span class="result-icon"><svg class="icon sm"><use href="#i-home"/></svg></span><span class="result-main"><span class="result-title">${title}</span><span class="result-meta">${meta}</span></span><span class="result-type">页面</span></button>`).join('')}`;
       return;
     }
@@ -1746,7 +1745,7 @@
 
   function sitesHTML() {
     const active = state.sitesTab;
-    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Sites &amp; Tokens<span class="slash">/</span><span class="en">站点与令牌</span></div><h1>一个库，服务多个站点</h1><p class="desc">站点按集合前缀读取内容；令牌只出现一次，库中只保存哈希。</p></div><div class="actions"><button class="btn secondary sm" data-action="new-site"><svg class="icon sm"><use href="#i-plus"/></svg>新建站点</button><button class="btn primary sm" data-action="issue-token"><svg class="icon sm"><use href="#i-shield"/></svg>签发令牌</button></div></div>
+    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Sites &amp; Tokens<span class="slash">/</span><span class="en">站点与令牌</span></div><h1>一个库，服务多个站点</h1><p class="desc">令牌只出现一次，库中只保存哈希。仅站点素材由区块的读者名单决定哪个站点能读。</p></div><div class="actions"><button class="btn secondary sm" data-action="new-site"><svg class="icon sm"><use href="#i-plus"/></svg>新建站点</button><button class="btn primary sm" data-action="issue-token"><svg class="icon sm"><use href="#i-shield"/></svg>签发令牌</button></div></div>
       <div class="tabs-line"><button class="${active === 'sites' ? 'active' : ''}" data-action="sites-tab" data-tab="sites">站点 <span class="count">${state.sites.length}</span></button><button class="${active === 'tokens' ? 'active' : ''}" data-action="sites-tab" data-tab="tokens">访问令牌 <span class="count">${state.tokens.length}</span></button><button class="${active === 'grants' ? 'active' : ''}" data-action="sites-tab" data-tab="grants">授权说明 <span class="count">GUIDE</span></button></div>
       ${active === 'sites' ? sitesTabHTML() : active === 'tokens' ? tokensTabHTML() : grantsGuideHTML()}`;
   }
@@ -1755,8 +1754,8 @@
     return `<div class="site-layout"><div class="site-list">${state.sites.map(site => {
       const grants = state.grants[site.id] || [];
       const count = state.tokens.filter(token => token.subject_type === 'site' && token.subject_id === site.id && !token.revoked).length;
-      return `<article class="site-card"><div class="site-mark">${esc((site.name || site.key).slice(0, 1).toUpperCase())}</div><div><div class="site-name">${esc(site.name || site.key)}</div><div class="site-key">${esc(site.key)} · created ${esc(dateFmt(site.created_at, false))}</div><div class="site-desc">${grants.length ? `读取 ${grants.length} 个前缀授权，未列出内容${grants.some(g => g.can_read_unlisted) ? '可' : '不可'}出现在集合里。` : '尚未配置集合授权。'}</div><div class="site-scopes">${grants.map(g => `<span>${esc(g.prefix)}${g.can_read_unlisted ? ' · unlisted' : ''}</span>`).join('') || '<span>NO GRANTS</span>'}</div></div><div class="site-side"><div class="tokens"><b>${count}</b>tokens</div><div class="site-card-actions"><button class="icon-btn bordered" style="width:28px;height:28px" data-action="manage-grants" data-id="${attr(site.id)}" title="管理授权"><svg class="icon sm"><use href="#i-shield"/></svg></button><button class="icon-btn bordered" style="width:28px;height:28px" data-action="issue-token" data-site="${attr(site.key)}" title="签发令牌"><svg class="icon sm"><use href="#i-plus"/></svg></button></div></div></article>`;
-    }).join('') || '<div class="empty-state"><div class="empty-icon"><svg class="icon"><use href="#i-globe"/></svg></div><h2>还没有站点</h2><p>网站通过站点令牌和集合授权读取已发布内容。先建一个站点，再签发令牌。</p><div class="empty-actions"><button class="btn primary sm" data-action="new-site">新建站点</button></div></div>'}<div class="upload-note"><b>前缀按点号分段匹配。</b> <span class="mono">home</span> 覆盖 <span class="mono">home.hero</span>，但不覆盖 <span class="mono">homepage</span>。集合能不能打开看归属；授权只决定内容可见性。</div></div><aside><div class="panel aside-panel"><div class="aside-title">令牌健康</div><p>站点令牌只能读取已发布内容。撤销后立即失效；已发布的公开文件不受影响。</p><div class="aside-rule"></div>${state.tokens.filter(t => !t.revoked).slice(0, 5).map(t => `<div class="token-health"><svg class="icon"><use href="#i-shield"/></svg>${esc(t.name || t.subject_type)}<span class="mono">${t.expires_at ? dateFmt(t.expires_at, false) : 'NO EXPIRY'}</span></div>`).join('') || '<div class="inline-note">还没有有效令牌。</div>'}<div class="aside-rule"></div><button class="btn secondary sm" style="width:100%;border-radius:8px" data-action="issue-token"><svg class="icon sm"><use href="#i-plus"/></svg>签发新令牌</button></div><div class="panel" style="margin-top:13px;padding:16px"><div class="section-label" style="margin-bottom:9px">安全边界</div><div class="inline-note">站点令牌只在网站服务器使用，不放进浏览器；管理端会话使用 HttpOnly Cookie 与 CSRF 头。</div></div></aside></div>`;
+      return `<article class="site-card"><div class="site-mark">${esc((site.name || site.key).slice(0, 1).toUpperCase())}</div><div><div class="site-name">${esc(site.name || site.key)}</div><div class="site-key">${esc(site.key)} · created ${esc(dateFmt(site.created_at, false))}</div><div class="site-desc">仅站点素材是否可读，看区块读者名单里有没有这个站点。</div><div class="site-scopes">${grants.map(g => `<span>${esc(g.prefix)}${g.can_read_unlisted ? ' · unlisted' : ''}</span>`).join('') || '<span>NO GRANTS</span>'}</div></div><div class="site-side"><div class="tokens"><b>${count}</b>tokens</div><div class="site-card-actions"><button class="icon-btn bordered" style="width:28px;height:28px" data-action="issue-token" data-site="${attr(site.key)}" title="签发令牌"><svg class="icon sm"><use href="#i-plus"/></svg></button></div></div></article>`;
+    }).join('') || '<div class="empty-state"><div class="empty-icon"><svg class="icon"><use href="#i-globe"/></svg></div><h2>还没有站点</h2><p>先建一个站点，再签发令牌。哪个站点能读仅站点素材，在区块的读者名单里指定。</p><div class="empty-actions"><button class="btn primary sm" data-action="new-site">新建站点</button></div></div>'}<div class="upload-note"><b>读者名单在区块上。</b> 发布区块时指定哪些站点能读它引用的仅站点素材。文件夹和标签仍负责归类。</div></div><aside><div class="panel aside-panel"><div class="aside-title">令牌健康</div><p>站点令牌只能读取已发布内容。撤销后立即失效；已发布的公开文件不受影响。</p><div class="aside-rule"></div>${state.tokens.filter(t => !t.revoked).slice(0, 5).map(t => `<div class="token-health"><svg class="icon"><use href="#i-shield"/></svg>${esc(t.name || t.subject_type)}<span class="mono">${t.expires_at ? dateFmt(t.expires_at, false) : 'NO EXPIRY'}</span></div>`).join('') || '<div class="inline-note">还没有有效令牌。</div>'}<div class="aside-rule"></div><button class="btn secondary sm" style="width:100%;border-radius:8px" data-action="issue-token"><svg class="icon sm"><use href="#i-plus"/></svg>签发新令牌</button></div><div class="panel" style="margin-top:13px;padding:16px"><div class="section-label" style="margin-bottom:9px">安全边界</div><div class="inline-note">站点令牌只在网站服务器使用，不放进浏览器；管理端会话使用 HttpOnly Cookie 与 CSRF 头。</div></div></aside></div>`;
   }
 
   function tokensTabHTML() {
@@ -1767,7 +1766,7 @@
   }
 
   function grantsGuideHTML() {
-    return `<div class="panel" style="padding:21px 23px;max-width:900px"><div class="panel-title">授权语义速查 <small>GRANTS EXPLAINED</small></div><div class="field-grid" style="gap:20px;margin-top:15px"><div><div class="section-label" style="margin-bottom:7px">COLLECTION ACCESS</div><p style="font-size:12px;line-height:1.85;color:#786A82">集合能不能打开，只看 <b>site_id</b>。库级集合对所有站点公开；属于某个站点的集合，只对那个站点开放。前缀授权不参与这个判断。</p><div class="aside-rule"></div><div class="section-label" style="margin-bottom:7px">CONTENT VISIBILITY</div><p style="font-size:12px;line-height:1.85;color:#786A82">前缀授权决定两件事：仅站点内容必须出现在已授权集合里；未列出内容要显式允许，才会出现在集合列表中。</p></div><div class="upload-note" style="margin-top:0;background:#F2ECF6;line-height:1.9"><b>示例：</b><br><span class="mono">home</span> → 覆盖 <span class="mono">home.hero</span>、<span class="mono">home.secondary</span><br><span class="mono">home</span> → 不覆盖 <span class="mono">homepage</span><br><br>带站点令牌但令牌无效：返回 <b>401</b>，不降级为匿名；否则「令牌用错」会显示成「内容不存在」。</div></div></div>`;
+    return `<div class="panel" style="padding:21px 23px;max-width:900px"><div class="panel-title">授权语义速查 <small>GRANTS EXPLAINED</small></div><div class="field-grid" style="gap:20px;margin-top:15px"><div><div class="section-label" style="margin-bottom:7px">COLLECTION ACCESS</div><p style="font-size:12px;line-height:1.85;color:#786A82">集合能不能打开，只看 <b>site_id</b>。库级集合对所有站点公开；属于某个站点的集合，只对那个站点开放。前缀授权不参与这个判断。</p><div class="aside-rule"></div><div class="section-label" style="margin-bottom:7px">CONTENT VISIBILITY</div><p style="font-size:12px;line-height:1.85;color:#786A82">仅站点素材只有被某个已发布、且把该站点列入读者名单的区块引用时，站点令牌才能读到。</p></div><div class="upload-note" style="margin-top:0;background:#F2ECF6;line-height:1.9"><b>示例：</b><br><span class="mono">home</span> → 覆盖 <span class="mono">home.hero</span>、<span class="mono">home.secondary</span><br><span class="mono">home</span> → 不覆盖 <span class="mono">homepage</span><br><br>带站点令牌但令牌无效：返回 <b>401</b>，不降级为匿名；否则「令牌用错」会显示成「内容不存在」。</div></div></div>`;
   }
 
   function openCreateSiteModal() {

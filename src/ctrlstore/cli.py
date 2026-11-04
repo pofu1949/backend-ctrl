@@ -27,7 +27,6 @@ from .assets import service as asset_service
 from .auth import permissions, service
 from .config import IS_POSIX, ConfigError, Settings, load_settings
 from .db import create_engine, run_migrations
-from .entries import service as entry_service
 from .errors import ApiError
 from .jobs import service as jobs_service
 from .log import configure_logging, ensure_utf8_stdout
@@ -132,15 +131,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _build_entry_commands(subcommands) -> None:
-    entry = subcommands.add_parser("entry", help="短文案字典")
+    entry = subcommands.add_parser("entry", help="管理没有版式的文案区块")
     actions = entry.add_subparsers(dest="action", required=True)
     for action, description in (
-        ("set", "新建或修改草稿"),
-        ("publish", "发布"),
-        ("unpublish", "撤回"),
+        ("set", "新建或修改文案区块草稿"),
+        ("publish", "发布文案区块"),
+        ("unpublish", "撤回文案区块"),
     ):
         command = actions.add_parser(action, help=description)
-        command.add_argument("key", help="文案键，例如 nav.about")
+        command.add_argument("key", help="文案别名，例如 nav.about")
         command.add_argument("--language", default="zh-CN")
         command.add_argument("--site", default=None, help="站点标识；省略表示库级")
         if action == "set":
@@ -150,43 +149,64 @@ def _build_entry_commands(subcommands) -> None:
 
 
 def _cmd_entry(args: argparse.Namespace) -> int:
+    """写入 copy 区块。不再往文案表写。"""
+    from .sections import service as section_service
+    from .sections.legacy import import_legacy
+    from .sections.template import COPY
+
     settings = _load(args)
+    # 迁移必须用这份配置的引擎。不传引擎时 Alembic 会按默认路径再读一次配置。
+    engine = create_engine(settings)
+    try:
+        run_migrations(settings, engine=engine)
+    finally:
+        engine.dispose()
     with _session(settings) as db:
+        import_legacy(db)
         actor = _actor(db)
-        entry_service.begin_write(db)
+        section_service.begin_write(db)
         site = service.find_site(db, args.site) if args.site else None
         if args.site and site is None:
             raise ApiError.invalid(f"站点不存在：{args.site}")
         site_id = site.id if site else None
-        entry = entry_service.find_by_key(db, args.key, language=args.language, site_id=site_id)
+        section = section_service.find_by_alias(
+            db, template_id=COPY.id, slug=args.key, language=args.language, site_id=site_id
+        )
         if args.action == "set":
-            fields = {"value": args.value}
+            fields: dict = {"body": args.value}
             if args.visibility is not None:
                 fields["visibility"] = args.visibility
-            if entry is None:
-                entry = entry_service.create(
+            if section is None:
+                section = section_service.create(
                     db,
                     settings=settings,
                     actor=actor,
                     fields={
-                        "key": args.key,
+                        "slug": args.key,
                         "language": args.language,
                         "site_id": site_id,
+                        "template": COPY.id,
+                        "title": args.key,
                         **fields,
                     },
                 )
             else:
-                entry = entry_service.update(
-                    db, entry.id, revision=entry.revision, fields=fields, actor=actor
+                section = section_service.update(
+                    db, section.id, revision=section.revision, fields=fields, actor=actor
                 )
-            print(f"已保存文案草稿：{entry.key}（{entry.language}）revision={entry.revision}")
+            print(f"已保存文案草稿：{section.slug}（{section.language}）revision={section.revision}")
         else:
-            if entry is None:
+            if section is None:
                 raise ApiError.not_found("文案不存在")
-            action = entry_service.publish if args.action == "publish" else entry_service.unpublish
-            entry = action(db, entry.id, revision=entry.revision, actor=actor)
+            action = (
+                section_service.publish
+                if args.action == "publish"
+                else section_service.unpublish
+            )
+            section = action(db, section.id, revision=section.revision, actor=actor)
             print(
-                f"文案状态：{entry.key}（{entry.language}）{entry.status} revision={entry.revision}"
+                f"文案状态：{section.slug}（{section.language}）{section.status} "
+                f"revision={section.revision}"
             )
     return 0
 

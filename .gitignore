@@ -2,6 +2,10 @@
 .venv/
 .tools/
 
+# uv 缓存（uv.lock 仍进版本库）
+.uv/
+.uv-cache/
+
 # Python 编译产物
 __pycache__/
 *.py[cod]
