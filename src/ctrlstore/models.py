@@ -92,6 +92,72 @@ class Entry(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Section(Base):
+    """分层页面区块。正文是一份有模板的 JSON，不另建一层 SQL 表。
+
+    编辑中的 ``body`` 与 ``published_body`` 分开：公开接口只读发布快照。
+    图片和视频不存在这里，正文里只放已经入库的内容 ID。
+    """
+
+    __tablename__ = "sections"
+    __table_args__ = (
+        Index(
+            "ux_sections_library_slug",
+            "language",
+            "slug",
+            unique=True,
+            sqlite_where=text("site_id IS NULL"),
+        ),
+        Index(
+            "ux_sections_site_slug",
+            "site_id",
+            "language",
+            "slug",
+            unique=True,
+            sqlite_where=text("site_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_sections_library_published",
+            "published_language",
+            "published_slug",
+            unique=True,
+            sqlite_where=text("status = 'published' AND published_site_id IS NULL"),
+        ),
+        Index(
+            "ux_sections_site_published",
+            "published_site_id",
+            "published_language",
+            "published_slug",
+            unique=True,
+            sqlite_where=text("status = 'published' AND published_site_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    slug: Mapped[str] = mapped_column(String(128))
+    language: Mapped[str] = mapped_column(String(32), default="zh-CN")
+    site_id: Mapped[str | None] = mapped_column(ForeignKey("sites.id", ondelete="RESTRICT"))
+    title: Mapped[str] = mapped_column(String(255), default="")
+    template: Mapped[str] = mapped_column(String(32))
+    visibility: Mapped[str] = mapped_column(String(16), default="public")
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    #: 草稿正文。形状由 template 决定，保存时校验。
+    body: Mapped[str] = mapped_column(Text, default="{}")
+    published_slug: Mapped[str | None] = mapped_column(String(128))
+    published_language: Mapped[str | None] = mapped_column(String(32))
+    published_site_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sites.id", ondelete="RESTRICT")
+    )
+    published_title: Mapped[str | None] = mapped_column(String(255))
+    published_template: Mapped[str | None] = mapped_column(String(32))
+    published_visibility: Mapped[str | None] = mapped_column(String(16))
+    published_body: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class User(Base):
     """账号。所有者与编辑各一行，角色不能通过接口修改。"""
 

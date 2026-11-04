@@ -29,8 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest==8.3.5",
-  "httpx==0.28.1",
   "ruff==0.11.8",
   "build==1.2.2.post1",
 ]
@@ -44,14 +42,10 @@ packages = ["src/ctrlstore"]
 [tool.hatch.build.targets.wheel.force-include]
 "alembic" = "ctrlstore/migrations"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra"
-
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["src", "tests"]
+src = ["src"]
 extend-exclude = [".venv", ".tools", "dist", "build"]
 
 [tool.ruff.lint]
@@ -72,7 +66,5 @@ extend-immutable-calls = [
 [dependency-groups]
 dev = [
     "build==1.2.2.post1",
-    "httpx==0.28.1",
-    "pytest==8.3.5",
     "ruff==0.11.8",
 ]

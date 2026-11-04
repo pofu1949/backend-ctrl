@@ -3,16 +3,12 @@
 一台 Linux 服务器上的内容库：接收、存放、编目、发布图片、视频、Markdown、PDF、Word、Excel 和纯文本，
 并向同一台机器上的网站提供稳定的读取方式。文件字节落在磁盘，SQLite 只保存索引、权限、发布状态与检索文本。
 
-* 范围与决议：[plan/项目企划书.md](plan/项目企划书.md)
-* 实施顺序：[plan/分步实现规划.md](plan/分步实现规划.md)
-
-当前进度：**第 1–11 部分已实现**；管理端位于 `/admin/`，包含独立的文案字典页。
+管理端位于 `/admin/`，包含内容库、发布和独立的文案字典页。
 
 ## 目录
 
 ```text
 backend_ctrl/
-  plan/                     企划书与分步实现规划
   src/ctrlstore/
     admin_ui/               管理端单页应用（HTML + CSS + JS，无需 Node 构建）
     config.py               配置分层与校验（含各类型大小上限）
@@ -80,7 +76,6 @@ backend_ctrl/
     systemd/                           API 模板、slice、worker
     Dockerfile / docker-compose.example.yml   可选容器跑法
   scripts/                  停写备份与恢复
-  tests/                    pytest
 ```
 
 代码约定：模块按职责分目录，一个文件只做一件事；中文注释说明「为什么」而不是「做了什么」；
@@ -92,16 +87,14 @@ backend_ctrl/
 
 ```bash
 uv sync --all-groups          # 建 .venv 并装齐运行与开发依赖
-uv run pytest                 # 跑测试
 uv run ruff check .           # 静态检查
 ```
 
 没有 `uv` 时也可以用 `python -m venv .venv` 加 `pip install -e ".[dev]"`。
 
-开发时不要把数据库放进仓库：配置里的路径指到仓库外的临时目录。
+开发时不要把数据库放进仓库：配置里的路径指到仓库外的目录。
 
-Windows 上开发只用于跑测试与命令行，`/var/lib/ctrlstore` 这类默认值当然不可用，测试一律把数据目录指到临时目录。
-生产以 Debian 13 + Python 3.13 为准。
+生产以 Debian 13 + Python 3.13 为准。数据目录默认 `/var/lib/ctrlstore`，配置默认 `/etc/ctrlstore/config.toml`，程序装在 `/opt/ctrlstore`。样例在 `deploy/`。
 
 ## 管理端
 
@@ -122,8 +115,6 @@ http://127.0.0.1:8000/admin/
 
 生产若在 Nginx 后面，`deploy/nginx/ctrlstore.conf.example` 已将 `/admin/` 反代到 API 进程。
 
-界面总览：[docs/admin-ui/overview.png](docs/admin-ui/overview.png)。完整页面截图在 [`docs/admin-ui/`](docs/admin-ui/)。
-
 ## 文案字典
 
 在管理端「文案」中按键维护短句，例如 `nav.about`。保存只改草稿，点击“发布已保存草稿”才更新网站读取的快照。所有者拥有全部能力；`entry.update` 可新建、修改并查看草稿，`entry.publish` 可审核、发布和撤回。预设 `editor` 仍是原有八项内容权限，`copywriter` 只含两项文案权限。
@@ -135,7 +126,7 @@ curl 'http://127.0.0.1:8000/api/public/v1/entries/nav.about?language=zh-CN'
 ctrlstore entry unpublish nav.about
 ```
 
-值是纯文本，网站使用文本节点插入。站点令牌读取同键时，本站专属优先于库级；不会回退到其他语言。默认全库最多 2000 条，使用 `entry_limit` 配置。API、分页、缓存、站点隔离与开发说明见 [docs/entries.md](docs/entries.md)。
+值是纯文本，网站使用文本节点插入。站点令牌读取同键时，本站专属优先于库级；不会回退到其他语言。默认全库最多 2000 条，使用 `entry_limit` 配置。公开读取是 `GET /api/public/v1/entries/{key}` 和 `GET /api/public/v1/entries`。匿名响应缓存 60 秒；站点令牌的响应不进共享缓存。尚未发布、已撤回或键不存在时返回 404。
 
 ## 配置
 
@@ -224,6 +215,7 @@ ctrlstore import ./photo.jpg --asset-id <内容 ID>   # 替换成新版本
 | POST | `/api/admin/v1/folders` | `folder.manage`；建目录 |
 | PATCH | `/api/admin/v1/folders/{id}` | `folder.manage`；改名（子孙路径同步） |
 | POST | `/api/admin/v1/folders/{id}/move` | `folder.manage`；移动（子孙跟着走） |
+| DELETE | `/api/admin/v1/folders/{id}` | `folder.manage`；删除目录及子孙，内容改为未归档 |
 | GET | `/api/admin/v1/tags` | `asset.read`；`q` 按名称筛选 |
 | POST | `/api/admin/v1/tags` | `tag.manage`；按名称取或建 |
 | GET | `/api/admin/v1/assets` | `asset.read`；游标分页与筛选 |
@@ -361,6 +353,9 @@ data/tmp/uploads/<session>/parts/000001.part   未完成的分片
 同一父目录下不能重名：非根目录用组合唯一约束，根目录用部分唯一索引
 （SQLite 的普通 UNIQUE 会把多个 NULL 当成不同值）。冲突返回 409。
 
+删除目录会连同子孙一起删掉。目录里的内容不删除，只把 `folder_id` 清空并改成未归档，
+内容修订号加 1。父目录外键是 `RESTRICT`，所以先解开内容，再从最深的子孙开始删。
+
 ### 标签
 
 名称唯一，`slug` 由名称派生（空白与标点折叠成 `-`，中文原样保留；折叠后撞车自动加序号）。
@@ -373,7 +368,7 @@ data/tmp/uploads/<session>/parts/000001.part   未完成的分片
 
 七类内容都落在同一张 `assets` 表里，`kind` 区分。上传类内容由上传完成自动登记；
 Markdown 与纯文本可以不经上传直接创建，也可以直接改正文——正文的每一次修改都写成新版本，
-与上传共用同一套版本结构、保留规则与发布路径（企划第 8.4 节 T1）。
+与上传共用同一套版本结构、保留规则与发布路径。
 
 `PATCH /assets/{id}` 的 `body` 字段只对 Markdown 与纯文本有效（其他类型返回 422，请替换文件）：
 
@@ -417,7 +412,7 @@ Markdown 与纯文本可以不经上传直接创建，也可以直接改正文�
 ### 可见性矩阵
 
 发布不等于公开：内容默认 `private`。只有「已发布 + `public` 或 `unlisted`」才会在
-`public/` 下出现文件（企划第 12.7 节）。
+`public/` 下出现文件。
 
 | 状态 + 可见性 | `/p/` 当前版 | 管理下载 |
 | --- | --- | --- |
@@ -740,8 +735,7 @@ curl -s http://127.0.0.1:8000/api/public/v1/assets/<内容 ID>   # 多了 thumb
 已经写好的日汇总。访客 HMAC 用 `pageview_hmac_secret`，**不要在某一天中途更换密钥**，
 否则同一天的人会被算成两批。访问上报量大且含访客行为，因此不进审计日志。
 
-统计口径需要时区数据：仓库的依赖里有 `tzdata`（Debian 13 自带系统时区，
-Windows 开发与测试靠这个包）。
+统计口径需要时区数据。Debian 13 自带系统时区；依赖里仍保留 `tzdata`，精简环境没有系统时区数据时也能算出日期。
 
 ### 主面板
 
@@ -943,6 +937,6 @@ JSON 行输出到 stdout，由 systemd 收进 journald。`log.py` 会丢弃命�
 异常只保留类型与消息。日志里不写文件正文。
 
 审计写在 `audit_logs`：登录成功与失败、退出、建账号、权限变更、停用、改密码、建站点、签发与撤销令牌，
-上传的开始、完成、取消与失败，建目录、改名、移动、建标签、内容登记、元数据修改、版本追加与淘汰，
+上传的开始、完成、取消与失败，建目录、改名、移动、删除目录、建标签、内容登记、元数据修改、版本追加与淘汰，
 以及发布、撤回、归档、回收站、定时发布登记与定时发布失败。
 登录失败的记录里只有用户名和 IP，不记密码；上传与内容记录里只有类型、字节数与哈希，不记文件正文。

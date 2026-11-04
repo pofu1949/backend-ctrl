@@ -29,6 +29,8 @@
     ['tag.manage', '管理标签'],
     ['entry.update', '新建与修改文案'],
     ['entry.publish', '发布与撤回文案'],
+    ['section.update', '新建与修改区块'],
+    ['section.publish', '发布与撤回区块'],
   ];
   const STATUS = {
     draft: ['草稿', 'draft'],
@@ -51,6 +53,8 @@
   const AUDIT_LABELS = {
     entry_created: '新建文案', entry_updated: '修改文案', entry_published: '发布文案',
     entry_unpublished: '撤回文案', entry_deleted: '删除文案',
+    section_created: '新建区块', section_updated: '修改区块', section_published: '发布区块',
+    section_unpublished: '撤回区块', section_deleted: '删除区块',
     login: '登录',
     login_failed: '登录失败',
     logout: '退出登录',
@@ -68,6 +72,7 @@
     folder_created: '创建目录',
     folder_renamed: '重命名目录',
     folder_moved: '移动目录',
+    folder_deleted: '删除目录',
     tag_created: '创建标签',
     tag_merged: '合并标签',
     asset_created: '创建内容',
@@ -118,6 +123,8 @@
     editor: null,
     uploadQueue: [],
     uploadBusy: false,
+    uploadFolderId: '',
+    uploadExpanded: {},
     collections: [],
     collection: null,
     collectionItems: [],
@@ -256,6 +263,10 @@
     api, esc, can, isOwner, openModal, closeModal, confirmDialog, toast,
     isActive: () => Boolean(state.me) && state.route === 'entries' && (can('entry.update') || can('entry.publish')),
   });
+  const sectionsUI = window.CtrlStoreSections.create({
+    api, esc, can, isOwner, openModal, closeModal, confirmDialog, toast,
+    isActive: () => Boolean(state.me) && state.route === 'sections' && (can('section.update') || can('section.publish')),
+  });
 
   /* ------------------------------------------------------------
      Boot / login / shell
@@ -321,6 +332,7 @@
     if (can('asset.read')) return 'library';
     if (can('asset.upload')) return 'upload';
     if (can('entry.update') || can('entry.publish')) return 'entries';
+    if (can('section.update') || can('section.publish')) return 'sections';
     return 'no-access';
   }
 
@@ -391,6 +403,7 @@
     if (name === 'no-access') return true;
     if (['dashboard', 'sites', 'users', 'system'].includes(name)) return isOwner();
     if (name === 'entries') return can('entry.update') || can('entry.publish');
+    if (name === 'sections') return can('section.update') || can('section.publish');
     if (name === 'upload') return can('asset.upload');
     if (name === 'trash') return can('asset.trash');
     if (['library', 'asset', 'editor', 'collections'].includes(name)) return can('asset.read');
@@ -420,8 +433,9 @@
       else if (route === 'library') await renderLibrary();
       else if (route === 'asset') await renderAsset(param);
       else if (route === 'editor') await renderEditor(param);
-      else if (route === 'upload') renderUploadPage();
+      else if (route === 'upload') await renderUploadPage();
       else if (route === 'entries') await entriesUI.render();
+      else if (route === 'sections') await sectionsUI.render(param);
       else if (route === 'collections') await renderCollections();
       else if (route === 'sites') await renderSites();
       else if (route === 'users') await renderUsers();
@@ -439,7 +453,7 @@
   function updateChrome(route) {
     const labels = {
       dashboard: '总览', library: '内容库', asset: '内容库 / 内容详情', editor: '内容库 / Markdown 编辑',
-      entries: '文案', upload: '上传', collections: '集合', sites: '站点与令牌', users: '账号与权限',
+      entries: '文案', sections: '区块', upload: '上传', collections: '集合', sites: '站点与令牌', users: '账号与权限',
       trash: '回收站', system: '系统状态', 'no-access': '访问受限',
     };
     $('#crumb').textContent = labels[route] || '总览';
@@ -485,6 +499,15 @@
       if (img.complete && img.naturalWidth > 0) done();
       img.addEventListener('load', done, { once: true });
       img.addEventListener('error', fail, { once: true });
+    });
+    $$('video[data-preview-video]', root).forEach(video => {
+      const done = () => {
+        if (!video.controls) video.pause();
+        video.classList.add('loaded');
+        video.closest('.type-art')?.classList.add('has-image');
+      };
+      video.addEventListener('loadeddata', done, { once: true });
+      video.addEventListener('error', () => video.remove(), { once: true });
     });
   }
 
@@ -610,7 +633,21 @@
     return Boolean((version?.derivatives || []).some(item => item.status === 'ready' && ['thumb', 'display', 'poster'].includes(item.purpose)));
   }
 
+  function fileInline(asset) {
+    return `${API}/assets/${encodeURIComponent(asset.id)}/file?inline=1`;
+  }
+
+  function videoTag(asset, { controls = false, className = 'asset-preview-img' } = {}) {
+    const poster = hasReadyPreview(asset)
+      ? ` poster="${attr(`${API}/assets/${encodeURIComponent(asset.id)}/thumb?rev=${encodeURIComponent(asset.revision)}`)}"`
+      : '';
+    // 列表只要第一帧，不接收点击，避免挡住卡片跳转。详情页要能播放，不能加媒体片段，也不能静音锁死。
+    const src = controls ? fileInline(asset) : `${fileInline(asset)}#t=0.1`;
+    return `<video class="${className}" data-preview-video${controls ? ' controls' : ' muted'} playsinline preload="metadata" src="${attr(src)}"${poster}></video>`;
+  }
+
   function thumbImg(asset) {
+    if (asset?.kind === 'video') return videoTag(asset);
     if (!hasReadyPreview(asset)) return '';
     const src = `${API}/assets/${encodeURIComponent(asset.id)}/thumb?rev=${encodeURIComponent(asset.revision)}`;
     return `<img class="asset-preview-img" data-preview-image src="${attr(src)}" alt="" loading="lazy">`;
@@ -659,9 +696,9 @@
     const pv = today?.pv;
     const delta = today?.uv_delta;
     const deltaHTML = !reported || today === null
-      ? '<span class="mono" style="font-size:8px;color:#A093A8">等待首次上报</span>'
+      ? '<span class="mono" style="font-size:12px;color:#A093A8">等待首次上报</span>'
       : delta === 0
-        ? '<span class="mono" style="font-size:8px;color:#9A8CA2">与昨日持平</span>'
+        ? '<span class="mono" style="font-size:12px;color:#9A8CA2">与昨日持平</span>'
         : `<span class="${delta > 0 ? 'up' : 'down'}">${delta > 0 ? '↑' : '↓'} ${num(Math.abs(delta))}</span><span>较昨日</span>`;
     return `
       <div class="page-intro">
@@ -680,7 +717,7 @@
         <div class="today-side">
           <div class="today-side-row"><div><span>页面浏览 / PV</span><small>PAGE VIEWS</small></div><b>${reported ? num(pv) : '—'}</b></div>
           <div class="today-side-row"><div><span>线上内容 / PUBLISHED</span><small>VISIBLE ITEMS</small></div><b>${num(totalPublished)}</b></div>
-          <div class="today-side-row"><div><span>数据状态 / REPORT</span><small>ASIA / SHANGHAI</small></div><b style="font-family:var(--mono);font-size:10px">${reported ? '已上报' : '尚未上报'}</b></div>
+          <div class="today-side-row"><div><span>数据状态 / REPORT</span><small>ASIA / SHANGHAI</small></div><b style="font-family:var(--mono);font-size:13px">${reported ? '已上报' : '尚未上报'}</b></div>
         </div>
         <div class="spark-wrap"><div class="spark-head"><span>本月每日访客</span><span class="live"><i></i>${reported ? 'REPORTED' : 'WAITING'}</span></div>${sparkline((data.month?.days || []).filter(d => d.day <= (data.today?.day || todayShanghai())), reported)}<div class="spark-labels"><span>01</span><span>08</span><span>15</span><span>22</span><span>${esc(monthLabel(state.dashboardMonth))}</span></div></div>
       </section>
@@ -709,7 +746,7 @@
   function sparkline(days, reported) {
     const values = (days || []).map(d => Number(d.uv || 0));
     if (!reported || !values.length) {
-      return '<div style="display:flex;align-items:center;justify-content:center;height:73px;color:#9B87BC;font-family:var(--mono);font-size:8px;letter-spacing:.08em">WAITING FOR FIRST PAGEVIEW REPORT</div>';
+      return '<div style="display:flex;align-items:center;justify-content:center;height:73px;color:#9B87BC;font-family:var(--mono);font-size:12px;letter-spacing:.08em">WAITING FOR FIRST PAGEVIEW REPORT</div>';
     }
     const max = Math.max(1, ...values);
     const w = 360, h = 76;
@@ -838,12 +875,12 @@
     return `
       <div class="page-head">
         <div><div class="eyebrow"><span class="dot"></span>Library<span class="slash">/</span><span class="en">内容库</span></div><h1>所有内容 <span class="count">${num(lib.items.length)} LOADED</span></h1><p class="desc">目录、标签、状态和版本都收在同一处；打开一条内容可以查看线上快照与待发布版本。</p></div>
-        <div class="actions"><button class="btn secondary" data-action="open-search"><svg class="icon sm"><use href="#i-search"/></svg>全库检索</button>${can('folder.manage') ? '<button class="btn secondary" data-action="new-folder"><svg class="icon sm"><use href="#i-folder"/></svg>新建目录</button>' : ''}${can('asset.upload') ? '<button class="btn primary" data-action="new-text"><svg class="icon sm"><use href="#i-plus"/></svg>新建文章</button>' : ''}</div>
+        <div class="actions"><button class="btn secondary" data-action="open-search"><svg class="icon sm"><use href="#i-search"/></svg>全库检索</button>${can('folder.manage') && lib.folder_id ? `<button class="btn secondary" data-action="delete-folder" data-id="${attr(lib.folder_id)}" style="color:#8E4650;border-color:#E5CFD1"><svg class="icon sm"><use href="#i-trash"/></svg>删除目录</button>` : ''}${can('folder.manage') ? '<button class="btn secondary" data-action="new-folder"><svg class="icon sm"><use href="#i-folder"/></svg>新建目录</button>' : ''}${can('asset.upload') ? '<button class="btn primary" data-action="new-text"><svg class="icon sm"><use href="#i-plus"/></svg>新建文章</button>' : ''}</div>
       </div>
       <div class="library-layout">
         <aside class="filter-panel">
-          <div class="filter-block"><div class="filter-head"><span class="section-label">目录 / FOLDERS</span>${can('folder.manage') ? '<button class="add-mini" data-action="new-folder" aria-label="新建目录"><svg class="icon sm"><use href="#i-plus"/></svg></button>' : ''}</div><div class="tree"><button class="tree-item ${!lib.folder_id ? 'active' : ''}" data-action="lib-folder" data-id=""><svg class="icon"><use href="#i-library"/></svg>全部内容</button>${folderTree(lib.folders, lib.folder_id)}</div></div>
-          <div class="filter-block"><div class="filter-head"><span class="section-label">标签 / TAGS</span></div><div class="tag-filter">${lib.tags.map(tag => `<button class="${lib.tag === tag.slug ? 'on' : ''}" data-action="lib-tag" data-slug="${attr(tag.slug)}">${esc(tag.name)}</button>`).join('') || '<span class="muted" style="font-size:9px">还没有标签</span>'}</div></div>
+          <div class="filter-block"><div class="filter-head"><span class="section-label">目录 / FOLDERS</span></div><div class="tree"><div class="tree-row"><button type="button" class="tree-item ${!lib.folder_id ? 'active' : ''}" data-action="lib-folder" data-id=""><svg class="icon"><use href="#i-library"/></svg><span class="label">全部内容</span></button>${folderAddButton('', '全部内容')}</div>${folderTree(lib.folders, lib.folder_id)}</div></div>
+          <div class="filter-block"><div class="filter-head"><span class="section-label">标签 / TAGS</span></div><div class="tag-filter">${lib.tags.map(tag => `<button class="${lib.tag === tag.slug ? 'on' : ''}" data-action="lib-tag" data-slug="${attr(tag.slug)}">${esc(tag.name)}</button>`).join('') || '<span class="muted" style="font-size:12px">还没有标签</span>'}</div></div>
           <div class="filter-rule">草稿与待发布版本只出现在这里。<br>公开区只认已发布快照和 <span class="mono">published_version_id</span>。</div>
         </aside>
         <div class="library-main">
@@ -856,10 +893,20 @@
       </div>`;
   }
 
+  function folderAddButton(parentId, label) {
+    if (!can('folder.manage')) return '';
+    const where = parentId ? `在「${label}」下新建子目录` : '在根目录下新建目录';
+    return `<button type="button" class="tree-add" data-action="new-folder" data-parent="${attr(parentId)}" aria-label="${attr(where)}"><svg class="icon sm"><use href="#i-plus"/></svg></button>`;
+  }
+
   function folderTree(folders, selected) {
+    const manage = can('folder.manage');
     return (folders || []).map(folder => {
       const depth = Math.max(0, String(folder.path || '').split('/').filter(Boolean).length - 1);
-      return `<button class="tree-item ${selected === folder.id ? 'active' : ''}" style="padding-left:${8 + depth * 16}px" data-action="lib-folder" data-id="${attr(folder.id)}"><svg class="icon"><use href="#i-folder"/></svg>${esc(folder.name)}</button>`;
+      const remove = manage
+        ? `<button type="button" class="tree-remove" data-action="delete-folder" data-id="${attr(folder.id)}" aria-label="删除目录 ${esc(folder.name)}"><svg class="icon sm"><use href="#i-trash"/></svg></button>`
+        : '';
+      return `<div class="tree-row"><button type="button" class="tree-item ${selected === folder.id ? 'active' : ''}" style="padding-left:${8 + depth * 16}px" data-action="lib-folder" data-id="${attr(folder.id)}"><svg class="icon"><use href="#i-folder"/></svg><span class="label">${esc(folder.name)}</span></button>${folderAddButton(folder.id, folder.name)}${remove}</div>`;
     }).join('');
   }
 
@@ -891,11 +938,49 @@
     navigate(`editor/${asset.id}`);
   }
 
-  function openNewFolderModal() {
-    const options = state.library.folders.map(f => `<option value="${attr(f.id)}">${esc(f.path)}</option>`).join('');
+  function confirmDeleteFolder(id) {
+    if (!id) return;
+    const folder = state.library.folders.find(item => item.id === id);
+    const prefix = folder ? `${folder.path}/` : '';
+    const removed = folder
+      ? state.library.folders.filter(item => item.id === folder.id || String(item.path || '').startsWith(prefix))
+      : [];
+    const childCount = Math.max(0, removed.length - 1);
+    confirmDialog({
+      kicker: 'Folder / 删除',
+      title: folder ? `删除目录「${folder.name}」？` : '删除这个目录？',
+      body: childCount
+        ? `这个目录和下面的 ${childCount} 个子目录会一起删除。里面的内容不会删除，只会改为未归档。`
+        : '目录会被删除。里面的内容不会删除，只会改为未归档。',
+      confirmLabel: '删除目录',
+      onConfirm: async () => {
+        await api(`/folders/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const gone = new Set(removed.map(item => item.id));
+        if (gone.has(state.library.folder_id) || state.library.folder_id === id) state.library.folder_id = '';
+        state.library.folders = await api('/folders');
+        toast('目录已删除');
+        await reloadLibrary();
+      },
+    });
+  }
+
+  function openNewFolderModal(parentId) {
+    const locked = parentId !== undefined;
+    const parent = locked && parentId
+      ? state.library.folders.find(item => item.id === parentId) || null
+      : null;
+    const place = !locked
+      ? ''
+      : parent
+        ? `将创建为「${esc(parent.name)}」的子目录。`
+        : '将创建在根目录下，出现在「全部内容」里。';
+    const parentField = locked
+      ? `<input type="hidden" name="parent_id" value="${attr(parent ? parent.id : '')}"><p class="help" style="margin:0 0 12px">${place}</p>`
+      : `<div class="field"><label>父目录 <span class="mini">PARENT</span></label><select class="select" name="parent_id"><option value="">根目录</option>${state.library.folders.map(f => `<option value="${attr(f.id)}">${esc(f.path)}</option>`).join('')}</select></div>`;
+    const title = !locked ? '新建一个目录' : parent ? `在「${parent.name}」下新建` : '在根目录下新建';
     openModal({
-      kicker: 'Folder / 目录', title: '新建一个目录',
-      body: `<form id="newFolderForm" data-form="new-folder"><div class="form-error"></div><div class="field"><label>目录名称 <span class="mini">NAME</span></label><input class="input" name="name" required maxlength="128" placeholder="例如：2026 秋季"></div><div class="field"><label>父目录 <span class="mini">PARENT</span></label><select class="select" name="parent_id"><option value="">根目录</option>${options}</select></div></form>`,
+      kicker: 'Folder / 目录', title,
+      body: `<form id="newFolderForm" data-form="new-folder"><div class="form-error"></div><div class="field"><label>目录名称 <span class="mini">NAME</span></label><input class="input" name="name" required maxlength="128" placeholder="例如：2026 秋季"></div>${parentField}</form>`,
       footer: `<span class="hint">同一父目录下不能重名。</span><button class="btn secondary sm" data-close-modal>取消</button><button class="btn primary sm" data-submit-form="newFolderForm">创建目录</button>`,
     });
   }
@@ -934,7 +1019,7 @@
     const q = String(query || '').trim();
     const box = $('#searchResults');
     if (!q) {
-      const pages = [['总览', '页面 · 今日访问、日历与库藏', 'dashboard'], ['内容库', '页面 · 目录、标签与内容列表', 'library'], ['上传', '页面 · 分片上传与队列', 'upload'], ['集合', '页面 · 顺序与公开契约', 'collections']].filter(([, , route]) => allowedRoute(route));
+      const pages = [['总览', '页面 · 今日访问、日历与库藏', 'dashboard'], ['内容库', '页面 · 目录、标签与内容列表', 'library'], ['上传', '页面 · 分片上传与队列', 'upload'], ['集合', '页面 · 顺序与公开契约', 'collections'], ['区块', '页面 · 分层字段与配图', 'sections'], ['文案', '页面 · 短句草稿与发布', 'entries']].filter(([, , route]) => allowedRoute(route));
       box.innerHTML = `<div class="result-group-label">页面</div>${pages.map(([title, meta, route]) => `<button class="result-row" data-route="${route}"><span class="result-icon"><svg class="icon sm"><use href="#i-home"/></svg></span><span class="result-main"><span class="result-title">${title}</span><span class="result-meta">${meta}</span></span><span class="result-type">页面</span></button>`).join('')}`;
       return;
     }
@@ -990,14 +1075,14 @@
       </div>
       <div class="asset-detail-layout">
         <div class="preview-panel">
-          <div class="preview-frame"><div class="preview-art type-art" data-kind="${attr(asset.kind)}"><span class="type-mark">${esc(kind.code)}<span class="type-sub">${esc(kind.label)}</span></span>${showPreview ? `<img class="preview-img asset-preview-img" data-preview-image src="${attr(previewSrc)}" alt="">` : ''}<div class="preview-overlay"><svg class="icon sm"><use href="#i-image"/></svg>${asset.kind === 'image' ? 'PREVIEW' : 'DERIVATIVE'} · ${esc(version?.mime || kind.label)} ${dims !== '—' ? '· ' + esc(dims) : ''}</div><div class="preview-tools"><button class="icon-btn" data-action="copy" data-value="${attr(asset.id)}" aria-label="复制内容 ID"><svg class="icon sm"><use href="#i-copy"/></svg></button><a class="icon-btn" href="${API}/assets/${encodeURIComponent(asset.id)}/file" target="_blank" rel="noopener" aria-label="下载"><svg class="icon sm"><use href="#i-download"/></svg></a></div></div></div>
+          <div class="preview-frame"><div class="preview-art type-art" data-kind="${attr(asset.kind)}"><span class="type-mark">${esc(kind.code)}<span class="type-sub">${esc(kind.label)}</span></span>${asset.kind === 'video' ? videoTag(asset, { controls: true, className: 'preview-img asset-preview-img' }) : (showPreview ? `<img class="preview-img asset-preview-img" data-preview-image src="${attr(previewSrc)}" alt="">` : '')}<div class="preview-overlay"><svg class="icon sm"><use href="#i-${asset.kind === 'video' ? 'play' : 'image'}"/></svg>${asset.kind === 'video' ? 'PLAYBACK' : (asset.kind === 'image' ? 'PREVIEW' : 'DERIVATIVE')} · ${esc(version?.mime || kind.label)} ${dims !== '—' ? '· ' + esc(dims) : ''}</div><div class="preview-tools"><button class="icon-btn" data-action="copy" data-value="${attr(asset.id)}" aria-label="复制内容 ID"><svg class="icon sm"><use href="#i-copy"/></svg></button><a class="icon-btn" href="${API}/assets/${encodeURIComponent(asset.id)}/file" target="_blank" rel="noopener" aria-label="下载"><svg class="icon sm"><use href="#i-download"/></svg></a></div></div></div>
           <div class="file-facts"><div class="file-fact"><span>文件</span><b title="${attr(version?.original_filename || '')}">${esc(version?.original_filename || '—')}</b></div><div class="file-fact"><span>大小</span><b>${bytes(version?.byte_size)}</b></div><div class="file-fact"><span>尺寸 / 时长</span><b>${esc(dims)}</b></div><div class="file-fact"><span>SHA-256</span><b title="${attr(version?.sha256 || '')}">${esc((version?.sha256 || '').slice(0, 12))}${version?.sha256 ? '…' : ''}</b></div></div>
           <div class="version-block"><div class="version-block-head"><span class="section-label">版本 / VERSIONS</span>${canUpdate ? '<label class="panel-link" for="replaceFile">替换文件 <svg class="icon sm"><use href="#i-plus"/></svg></label><input id="replaceFile" type="file" hidden>' : ''}</div>
-            ${(asset.versions || []).slice().reverse().map(v => `<div class="version-row"><div class="v">v${v.version_no} ${v.id === asset.current_version_id ? '<small>当前</small>' : ''}</div><div><b>${esc(v.original_filename)}</b><div class="mono">${esc(dateFmt(v.created_at))} · ${bytes(v.byte_size)} · ${esc(v.mime)}</div></div><span class="mono">${v.id === asset.published_version_id ? '<span class="pill published" style="height:18px;font-size:7px"><i></i>线上</span>' : '保留'}</span><span class="mono">${esc(v.extract_status || '')}</span></div>`).join('') || '<div class="inline-note">还没有版本。</div>'}
+            ${(asset.versions || []).slice().reverse().map(v => `<div class="version-row"><div class="v">v${v.version_no} ${v.id === asset.current_version_id ? '<small>当前</small>' : ''}</div><div><b>${esc(v.original_filename)}</b><div class="mono">${esc(dateFmt(v.created_at))} · ${bytes(v.byte_size)} · ${esc(v.mime)}</div></div><span class="mono">${v.id === asset.published_version_id ? '<span class="pill published" style="height:18px;font-size:13px"><i></i>线上</span>' : '保留'}</span><span class="mono">${esc(v.extract_status || '')}</span></div>`).join('') || '<div class="inline-note">还没有版本。</div>'}
           </div>
         </div>
         <div class="panel info-panel">
-          <div class="info-panel-head"><div class="panel-title" style="font-size:20px">内容信息 <small>EDITING FIELDS · 不影响线上</small></div><button class="icon-btn bordered" style="width:30px;height:30px" data-action="copy" data-value="${attr(asset.id)}" aria-label="复制 ID"><svg class="icon sm"><use href="#i-copy"/></svg></button></div>
+          <div class="info-panel-head"><div class="panel-title" style="font-size:21px">内容信息 <small>EDITING FIELDS · 不影响线上</small></div><button class="icon-btn bordered" style="width:30px;height:30px" data-action="copy" data-value="${attr(asset.id)}" aria-label="复制 ID"><svg class="icon sm"><use href="#i-copy"/></svg></button></div>
           <div class="tabs" id="assetTabs"><button class="tab active" data-action="asset-tab" data-tab="basic">基本信息</button><button class="tab" data-action="asset-tab" data-tab="publish">发布与生命周期</button></div>
           <div class="tab-panel active" data-asset-panel="basic">
             <div class="publish-status"><div class="left"><svg class="icon"><use href="#i-spark"/></svg><div><strong>${asset.status === 'published' ? `线上运行中 · v${publishedVersion?.version_no ?? '—'}` : asset.status === 'trashed' ? '在回收站中' : '尚未发布'}</strong><small>${asset.published_version_id ? '当前线上快照存在；编辑字段不会改变访客看到的内容。' : '发布后才会生成公开快照与公开地址。'}</small></div></div>${starPill(asset.status, asset.visibility)}</div>
@@ -1147,7 +1232,7 @@
   function editorHTML(asset, body) {
     return `<div class="editor-head"><div><button class="back-link" data-route="asset/${attr(asset.id)}"><svg class="icon sm"><use href="#i-arrow-left"/></svg>返回内容详情</button><h1>${esc(asset.title || '未命名文章')}</h1><div class="detail-sub"><span>${esc(KINDS[asset.kind]?.label || asset.kind)}</span><span class="sep">/</span><span>${esc(asset.slug || '无别名')}</span><span class="sep">/</span>${starPill(asset.status, asset.visibility)}</div></div><div class="actions"><button class="btn secondary sm" data-action="editor-preview"><svg class="icon sm"><use href="#i-eye"/></svg>预览</button><button class="btn secondary sm" data-action="editor-save"><svg class="icon sm"><use href="#i-check"/></svg>保存草稿</button>${can('asset.publish') ? '<button class="btn primary sm" data-action="publish-asset"><svg class="icon sm"><use href="#i-spark"/></svg>发布</button>' : ''}</div></div>
       <div class="editor-meta-bar"><span class="item"><svg class="icon" style="width:12px;height:12px"><use href="#i-clock"/></svg><b id="editorState">最后保存 v${asset.current_version?.version_no ?? '—'} · ${esc(dateFmt(asset.updated_at))}</b></span><span class="item">字数 <b id="mdCount">—</b></span><span class="item">当前 revision <b id="editorRevision">${asset.revision}</b></span><span class="item" style="margin-left:auto;color:#7B6889"><svg class="icon" style="width:12px;height:12px"><use href="#i-info"/></svg>${esc(KINDS[asset.kind]?.label || '')} · 保存会生成新版本</span></div>
-      <div class="editor-layout"><div class="editor-pane"><div class="pane-head"><span class="pane-label">SOURCE / 源文</span><button class="tool" data-action="insert-md" data-before="## " data-after="" title="标题">H</button><button class="tool serif" data-action="insert-md" data-before="**" data-after="**" title="加粗"><b>B</b></button><button class="tool italic" data-action="insert-md" data-before="*" data-after="*" title="斜体">I</button><button class="tool" data-action="insert-md" data-before="\`" data-after="\`" title="行内代码"><svg class="icon sm"><use href="#i-command"/></svg></button><button class="tool" data-action="insert-md" data-before="![说明](asset:" data-after=")" title="图片引用"><svg class="icon sm"><use href="#i-image"/></svg></button></div><textarea class="editor-textarea" id="mdEditor" spellcheck="false" aria-label="正文">${esc(body)}</textarea></div><div class="preview-pane"><div class="pane-head"><span class="pane-label">PREVIEW / 预览</span><span class="pill published" style="height:20px;font-size:7.5px"><i></i>安全预览</span></div><div class="preview-body" id="mdPreview"></div></div></div>`;
+      <div class="editor-layout"><div class="editor-pane"><div class="pane-head"><span class="pane-label">SOURCE / 源文</span><button class="tool" data-action="insert-md" data-before="## " data-after="" title="标题">H</button><button class="tool serif" data-action="insert-md" data-before="**" data-after="**" title="加粗"><b>B</b></button><button class="tool italic" data-action="insert-md" data-before="*" data-after="*" title="斜体">I</button><button class="tool" data-action="insert-md" data-before="\`" data-after="\`" title="行内代码"><svg class="icon sm"><use href="#i-command"/></svg></button><button class="tool" data-action="insert-md" data-before="![说明](asset:" data-after=")" title="图片引用"><svg class="icon sm"><use href="#i-image"/></svg></button></div><textarea class="editor-textarea" id="mdEditor" spellcheck="false" aria-label="正文">${esc(body)}</textarea></div><div class="preview-pane"><div class="pane-head"><span class="pane-label">PREVIEW / 预览</span><span class="pill published" style="height:20px;font-size:13px"><i></i>安全预览</span></div><div class="preview-body" id="mdPreview"></div></div></div>`;
   }
 
   function updateEditorPreview(markDirty = true) {
@@ -1254,13 +1339,98 @@
   /* ------------------------------------------------------------
      Upload
      ------------------------------------------------------------ */
-  function renderUploadPage() {
-    $('#view').innerHTML = `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Ingest<span class="slash">/</span><span class="en">上传</span></div><h1>把文件交给内容库</h1><p class="desc">按文件头识别类型；分片上传，服务端合并后再登记草稿。上传完成不等于发布。</p></div><div class="actions"><button class="btn primary sm" data-action="upload-pick"><svg class="icon sm"><use href="#i-plus"/></svg>选择文件</button></div></div>
-      <div class="upload-layout"><div><div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="上传文件"><div class="upload-glyph"><svg class="icon lg"><use href="#i-upload"/></svg></div><h3>拖入文件，或从电脑选择</h3><p>支持分片续传；类型、大小与哈希由服务端重新校验。</p><span class="btn secondary sm">选择文件</span><div class="allowed"><span>JPG</span><span>PNG</span><span>GIF</span><span>WEBP</span><span>MP4</span><span>WEBM</span><span>MD</span><span>PDF</span><span>DOCX</span><span>XLSX</span><span>TXT</span></div></div><input id="fileInput" type="file" hidden multiple>
+  async function renderUploadPage() {
+    const token = state.routeToken;
+    try {
+      state.library.folders = await api('/folders');
+    } catch (error) {
+      if (error.status !== 403) throw error;
+    }
+    if (token !== state.routeToken) return;
+    if (state.uploadFolderId && !state.library.folders.some(folder => folder.id === state.uploadFolderId)) {
+      state.uploadFolderId = '';
+    }
+    revealUploadAncestors();
+    $('#view').innerHTML = `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Ingest<span class="slash">/</span><span class="en">上传</span></div><h1>上传内容</h1><p class="desc">在同一张卡片里选定目录，再把文件拖进去。不选目录时放在根目录。上传完成只是草稿，还不发布。</p></div><div class="actions"><button class="btn primary sm" data-action="upload-pick"><svg class="icon sm"><use href="#i-plus"/></svg>选择文件</button></div></div>
+      <div class="upload-layout"><div><section class="upload-card">
+        <header class="upload-card-head"><div><span class="upload-kicker">Destination · 保存位置</span><h2 id="uploadFolderName">${esc(uploadFolderName())}</h2><p>接下来拖入或选择的文件会放进这个目录。右侧点一行即可更换；有下级的目录会同时展开。</p></div><div class="upload-card-path" id="uploadFolderPath">${esc(uploadFolderLabel())}</div></header>
+        <div class="upload-card-split"><div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="选择要上传的文件"><div class="upload-glyph"><svg class="icon lg"><use href="#i-upload"/></svg></div><strong>把文件拖到这里</strong><p>或从电脑选择。类型、大小和哈希由服务端重新校验。</p><span class="btn secondary sm">选择文件</span><div class="allowed"><span>JPG</span><span>PNG</span><span>GIF</span><span>WEBP</span><span>MP4</span><span>WEBM</span><span>MD</span><span>PDF</span><span>DOCX</span><span>XLSX</span><span>TXT</span></div></div>
+        <div class="upload-card-folders"><div class="upload-card-folders-head"><b>目录</b><span>单击选中并展开</span></div><div id="uploadFolderTree" class="upload-folder-tree">${folderTreeHTML(null)}</div></div></div>
+        <input id="fileInput" type="file" hidden multiple></section>
         <div class="upload-queue"><div class="queue-head"><div class="queue-title">上传队列 <span id="queueCount">${state.uploadQueue.length} 项</span></div><div class="queue-actions"><button class="btn ghost xs" data-action="upload-clear">清理已完成</button></div></div><div class="queue-list" id="uploadQueue">${uploadQueueHTML()}</div></div>
-      </div><aside class="upload-side"><div class="panel"><div class="panel-title" style="font-size:18px">服务端校验 <small>SERVER-SIDE CHECKS</small></div><div class="rules-list"><div class="rule-row"><span><svg class="icon"><use href="#i-image"/></svg>图片</span><b>类型头 · 像素上限</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-video"/></svg>视频</span><b>分片 · 容器探测</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-text"/></svg>Markdown / 文本</span><b>UTF-8</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-doc"/></svg>PDF / Word / Excel</span><b>文件头 · 配额</b></div></div><div class="upload-note"><b>不接受</b> HTML、SVG、ZIP、可执行文件与旧版 .doc / .xls。分片以 4 MiB 为单位，临时失败自动重试两次；仍失败可在队列中重试，已上传分片会保留。</div></div><div class="panel" style="margin-top:14px"><div class="panel-title" style="font-size:17px">入库之后 <small>WHAT HAPPENS NEXT</small></div><div class="definition-grid" style="grid-template-columns:1fr"><div class="definition-row"><span>版本</span><b>自动成为 v1 草稿</b></div><div class="definition-row"><span>派生</span><b>缩略图 / 抽取入队</b></div><div class="definition-row"><span>公开</span><b>发布后才可见</b></div></div></div></aside></div>
-      <div class="process-strip"><div class="process-item"><div class="process-num">01</div><div><b>识别与校验</b><span>只读文件头判断真实类型，扩展名、声明类型与大小上限三者一致才继续。</span><em>INSPECTION · SHA-256</em></div></div><div class="process-item"><div class="process-num">02</div><div><b>落盘并登记</b><span>原件按内容 ID 分片写入，SQLite 登记版本；此时内容仍是草稿、私有。</span><em>ORIGINAL · VERSION ROW</em></div></div><div class="process-item"><div class="process-num">03</div><div><b>派生与发布</b><span>缩略图、抽取任务进入队列。发布不会等派生完成，原图地址始终可用。</span><em>QUEUE · PUBLISH SNAPSHOT</em></div></div></div>`;
+      </div><aside class="upload-side"><div class="panel"><div class="panel-title" style="font-size:19px">服务端校验 <small>SERVER-SIDE CHECKS</small></div><div class="rules-list"><div class="rule-row"><span><svg class="icon"><use href="#i-image"/></svg>图片</span><b>类型头 · 像素上限</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-video"/></svg>视频</span><b>分片 · 容器探测</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-text"/></svg>Markdown / 文本</span><b>UTF-8</b></div><div class="rule-row"><span><svg class="icon"><use href="#i-doc"/></svg>PDF / Word / Excel</span><b>文件头 · 配额</b></div></div><div class="upload-note"><b>不接受</b> HTML、SVG、ZIP、可执行文件与旧版 .doc / .xls。分片以 4 MiB 为单位，临时失败自动重试两次；仍失败可在队列中重试，已上传分片会保留。</div></div><div class="panel" style="margin-top:14px"><div class="panel-title" style="font-size:18px">入库之后 <small>WHAT HAPPENS NEXT</small></div><div class="definition-grid" style="grid-template-columns:1fr"><div class="definition-row"><span>目录</span><b id="uploadSideFolder">${esc(uploadFolderLabel())}</b></div><div class="definition-row"><span>版本</span><b>自动成为 v1 草稿</b></div><div class="definition-row"><span>派生</span><b>缩略图 / 抽取入队</b></div><div class="definition-row"><span>公开</span><b>发布后才可见</b></div></div></div></aside></div>
+      <div class="process-strip"><div class="process-item"><div class="process-num">01</div><div><b>识别与校验</b><span>只读文件头判断真实类型，扩展名、声明类型与大小上限三者一致才继续。</span><em>INSPECTION · SHA-256</em></div></div><div class="process-item"><div class="process-num">02</div><div><b>落盘并登记</b><span>原件按内容 ID 写入，并记到所选目录。此时内容仍是草稿、私有。</span><em>ORIGINAL · FOLDER</em></div></div><div class="process-item"><div class="process-num">03</div><div><b>派生与发布</b><span>缩略图、抽取任务进入队列。到内容库点开对应目录即可看到。发布后才进入公开区。</span><em>QUEUE · PUBLISH SNAPSHOT</em></div></div></div>`;
     bindUploadDropzone();
+  }
+
+  function uploadFolderRecord() {
+    return state.library.folders.find(item => item.id === state.uploadFolderId) || null;
+  }
+
+  function uploadFolderName() {
+    return uploadFolderRecord()?.name || '根目录';
+  }
+
+  function uploadFolderLabel() {
+    const folder = uploadFolderRecord();
+    return folder ? (folder.path || folder.name) : '根目录';
+  }
+
+  function foldersUnder(parentId) {
+    return state.library.folders.filter(folder => (folder.parent_id || null) === (parentId || null));
+  }
+
+  function folderHasChildren(id) {
+    return state.library.folders.some(folder => folder.parent_id === id);
+  }
+
+  function revealUploadAncestors() {
+    const byId = new Map(state.library.folders.map(folder => [folder.id, folder]));
+    let current = byId.get(state.uploadFolderId);
+    while (current?.parent_id) {
+      state.uploadExpanded[current.parent_id] = true;
+      current = byId.get(current.parent_id);
+    }
+  }
+
+  function folderTreeHTML(parentId) {
+    const selected = state.uploadFolderId;
+    const nodes = foldersUnder(parentId);
+    if (!parentId && !nodes.length) {
+      return `<button type="button" class="folder-option on" data-action="upload-folder" data-id=""><svg class="icon"><use href="#i-library"/></svg><span>根目录</span><small>默认</small></button><p class="folder-drawer-empty">还没有子目录。文件会先放在根目录。</p>`;
+    }
+    const rows = [];
+    if (!parentId) {
+      rows.push(`<div class="folder-row"><span class="folder-caret placeholder"></span><button type="button" class="folder-option ${selected ? '' : 'on'}" data-action="upload-folder" data-id=""><svg class="icon"><use href="#i-library"/></svg><span>根目录</span>${selected ? '' : '<em>当前</em>'}</button></div>`);
+    }
+    for (const folder of nodes) {
+      const kids = folderHasChildren(folder.id);
+      const open = Boolean(state.uploadExpanded[folder.id]);
+      const caret = kids
+        ? `<button type="button" class="folder-caret ${open ? 'open' : ''}" data-action="upload-folder-expand" data-id="${attr(folder.id)}" aria-expanded="${open ? 'true' : 'false'}" aria-label="${open ? '收起' : '展开'} ${esc(folder.name)}"><svg class="icon sm"><use href="#i-chevron-right"/></svg></button>`
+        : '<span class="folder-caret placeholder"></span>';
+      const children = kids && open ? `<div class="folder-children">${folderTreeHTML(folder.id)}</div>` : '';
+      const mark = selected === folder.id ? '<em>当前</em>' : '';
+      rows.push(`<div class="folder-node"><div class="folder-row">${caret}<button type="button" class="folder-option ${selected === folder.id ? 'on' : ''}" data-action="upload-folder" data-id="${attr(folder.id)}" data-expandable="${kids ? '1' : ''}"><svg class="icon"><use href="#i-folder"/></svg><span>${esc(folder.name)}</span>${mark}</button></div>${children}</div>`);
+    }
+    return rows.join('');
+  }
+
+  function paintUploadFolders() {
+    const tree = $('#uploadFolderTree');
+    if (tree) tree.innerHTML = folderTreeHTML(null);
+  }
+
+  function syncUploadFolderChoice() {
+    const name = uploadFolderName();
+    const label = uploadFolderLabel();
+    const title = $('#uploadFolderName');
+    if (title) title.textContent = name;
+    const path = $('#uploadFolderPath');
+    if (path) path.textContent = label;
+    const side = $('#uploadSideFolder');
+    if (side) side.textContent = label;
+    paintUploadFolders();
   }
 
   function uploadQueueHTML() {
@@ -1271,7 +1441,8 @@
       const kind = KINDS[item.kind] || { label: '文件', code: 'FILE' };
       const percent = Math.min(100, Math.round(item.progress || 0));
       const stateLabel = item.retrying ? '<span class="pill pending"><i></i>重试分片中</span>' : item.status === 'done' ? '<span class="pill published"><i></i>已登记</span>' : item.status === 'error' ? '<span class="pill failed"><i></i>失败</span>' : item.status === 'queued' ? '<span class="pill pending"><i></i>等待中</span>' : '<span class="pill pending"><i></i>上传中</span>';
-      return `<div class="queue-row"><div class="queue-thumb type-art" data-kind="${attr(item.kind)}"><span class="type-mark">${esc(kind.code)}</span></div><div><div class="queue-name">${esc(item.name)}</div><div class="queue-sub">${esc(kind.label)} · ${bytes(item.size)} · ${item.status === 'error' ? esc(item.error || '失败') : item.status === 'done' ? '内容已登记' : `${percent}%`}</div><div class="queue-progress"><span style="width:${percent}%"></span></div></div><div class="queue-size">${item.assetId ? `<button class="btn secondary xs" data-route="asset/${attr(item.assetId)}">查看</button>` : bytes(item.size)}</div><div class="queue-state">${stateLabel}${item.status === 'error' && item.retryable ? `<button class="btn secondary xs" data-action="upload-retry" data-id="${attr(item.id)}">重试失败分片</button>` : ''}${item.status === 'done' || item.status === 'error' ? `<button class="icon-btn queue-remove" data-action="upload-remove" data-id="${attr(item.id)}" aria-label="移除"><svg class="icon sm"><use href="#i-close"/></svg></button>` : ''}</div></div>`;
+      const place = item.folderLabel || '根目录';
+      return `<div class="queue-row"><div class="queue-thumb type-art" data-kind="${attr(item.kind)}"><span class="type-mark">${esc(kind.code)}</span></div><div><div class="queue-name">${esc(item.name)}</div><div class="queue-sub">${esc(kind.label)} · ${bytes(item.size)} · ${esc(place)} · ${item.status === 'error' ? esc(item.error || '失败') : item.status === 'done' ? '内容已登记' : `${percent}%`}</div><div class="queue-progress"><span style="width:${percent}%"></span></div></div><div class="queue-size">${item.assetId ? `<button class="btn secondary xs" data-route="asset/${attr(item.assetId)}">查看</button>` : bytes(item.size)}</div><div class="queue-state">${stateLabel}${item.status === 'error' && item.retryable ? `<button class="btn secondary xs" data-action="upload-retry" data-id="${attr(item.id)}">重试失败分片</button>` : ''}${item.status === 'done' || item.status === 'error' ? `<button class="icon-btn queue-remove" data-action="upload-remove" data-id="${attr(item.id)}" aria-label="移除"><svg class="icon sm"><use href="#i-close"/></svg></button>` : ''}</div></div>`;
     }).join('');
   }
 
@@ -1286,8 +1457,13 @@
   }
 
   function addUploadFiles(files) {
+    const place = uploadFolderLabel();
     for (const file of files) {
-      state.uploadQueue.push({ id: uuid(), file, name: file.name, size: file.size, kind: guessKind(file.name), status: 'queued', progress: 0, error: null, assetId: null });
+      state.uploadQueue.push({
+        id: uuid(), file, name: file.name, size: file.size, kind: guessKind(file.name),
+        status: 'queued', progress: 0, error: null, assetId: null,
+        folderId: state.uploadFolderId || '', folderLabel: place,
+      });
     }
     renderUploadQueue();
     processUploadQueue();
@@ -1375,7 +1551,8 @@
         if (!fromAssetPage) renderUploadQueue();
       }
       item.completeKey = item.completeKey || uuid();
-      const completed = await api(`/uploads/${encodeURIComponent(session.id)}/complete`, {
+      const folderQuery = !assetId && item.folderId ? `?folder_id=${encodeURIComponent(item.folderId)}` : '';
+      const completed = await api(`/uploads/${encodeURIComponent(session.id)}/complete${folderQuery}`, {
         method: 'POST', headers: { 'Idempotency-Key': item.completeKey },
       });
       item.uploadSession = null;
@@ -1385,7 +1562,7 @@
       item.assetId = completed.asset_id;
       if (!fromAssetPage) {
         renderUploadQueue();
-        toast(`上传完成 · ${file.name}`);
+        toast(`上传完成 · ${file.name} · ${item.folderLabel || '根目录'}`);
       } else if (assetId) {
         toast('新版本已上传，线上版本尚未改变');
         await renderAsset(assetId);
@@ -1452,21 +1629,21 @@
   }
 
   function collectionMainHTML(collection, sites) {
-    return `<div class="collection-main"><div class="collection-header"><div class="collection-header-top"><div><div class="collection-kicker">Collection / ${esc(sites[collection.site_id]?.key || 'library-level')}</div><h2>${esc(collection.title || collection.slug)}</h2><div class="collection-meta"><span class="tag mono" style="font-family:var(--mono);font-size:8px">${esc(collection.slug)}</span><span class="chip">${esc(sites[collection.site_id]?.name || '库级')}</span>${(collection.allowed_kinds || []).map(kind => `<span class="chip">${esc(KINDS[kind]?.label || kind)}</span>`).join('') || '<span class="chip">不限类型</span>'}</div></div><div class="collection-actions"><button class="btn secondary sm" data-action="collection-preview"><svg class="icon sm"><use href="#i-external"/></svg>查看结构</button>${can('collection.manage') ? `<button class="btn primary sm" data-action="collection-save-order" ${state.collectionDirty ? '' : 'disabled'}><svg class="icon sm"><use href="#i-check"/></svg>保存顺序</button>` : ''}</div></div></div>
+    return `<div class="collection-main"><div class="collection-header"><div class="collection-header-top"><div><div class="collection-kicker">Collection / ${esc(sites[collection.site_id]?.key || 'library-level')}</div><h2>${esc(collection.title || collection.slug)}</h2><div class="collection-meta"><span class="tag mono" style="font-family:var(--mono);font-size:12px">${esc(collection.slug)}</span><span class="chip">${esc(sites[collection.site_id]?.name || '库级')}</span>${(collection.allowed_kinds || []).map(kind => `<span class="chip">${esc(KINDS[kind]?.label || kind)}</span>`).join('') || '<span class="chip">不限类型</span>'}</div></div><div class="collection-actions"><button class="btn secondary sm" data-action="collection-preview"><svg class="icon sm"><use href="#i-external"/></svg>查看结构</button>${can('collection.manage') ? `<button class="btn primary sm" data-action="collection-save-order" ${state.collectionDirty ? '' : 'disabled'}><svg class="icon sm"><use href="#i-check"/></svg>保存顺序</button>` : ''}</div></div></div>
       <div class="order-list"><div class="order-head"><span></span><span>预览</span><span>标题 / 条目说明</span><span>类型</span><span>状态</span><span style="text-align:right">调整</span></div>
       ${state.collectionItems.length ? state.collectionItems.map(({item, asset}, index) => {
         const version = asset?.current_version;
         return `<div class="order-row" data-asset-id="${attr(item.asset_id)}"><span class="drag-handle"><svg class="icon sm"><use href="#i-drag"/></svg></span><span class="order-thumb type-art" data-kind="${attr(asset?.kind || 'text')}"><span class="type-mark">${esc(KINDS[asset?.kind]?.code || '—')}</span>${asset ? thumbImg(asset) : ''}</span><div><div class="order-title">${esc(asset?.title || item.asset_id)}</div><div class="order-caption">${esc(item.caption || '无 caption')} · ${esc(version?.original_filename || '')}</div></div><span class="order-kind">${esc(KINDS[asset?.kind]?.code || '—')}</span><span>${asset ? starPill(asset.status, asset.visibility) : '<span class="pill private"><i></i>不可读</span>'}</span>${can('collection.manage') ? `<div class="order-move"><button data-action="collection-move" data-dir="up" data-index="${index}" aria-label="上移"><svg class="icon sm"><use href="#i-chevron-up"/></svg></button><button data-action="collection-move" data-dir="down" data-index="${index}" aria-label="下移"><svg class="icon sm"><use href="#i-chevron-down"/></svg></button><button data-action="collection-remove" data-id="${attr(item.asset_id)}" aria-label="移除"><svg class="icon sm"><use href="#i-close"/></svg></button></div>` : '<div class="order-move"></div>'}</div>`;
       }).join('') : `<div class="empty-state" style="border:0;padding:30px 10px"><div class="empty-icon"><svg class="icon"><use href="#i-layers"/></svg></div><h2>集合还是空的</h2><p>从内容库添加条目，顺序就是网站读取到的顺序。</p>${can('collection.manage') ? '<div class="empty-actions"><button class="btn primary sm" data-action="collection-add-item">添加条目</button></div>' : ''}</div>`}
       <div class="order-foot"><span class="left"><svg class="icon" style="width:13px;height:13px"><use href="#i-info"/></svg>${state.collectionDirty ? '顺序有未保存修改。' : '顺序会整体提交；同一集合内同一内容只出现一次。'}</span>${can('collection.manage') ? '<button class="btn secondary xs" data-action="collection-add-item"><svg class="icon sm"><use href="#i-plus"/></svg>添加条目</button>' : ''}</div></div>
-      <div class="detail-lower"><section class="panel"><div class="panel-head" style="margin-bottom:7px"><div class="panel-title" style="font-size:18px">读取契约 <small>PUBLIC SHAPE</small></div><button class="panel-link" data-action="collection-preview">打开完整响应 <svg class="icon sm"><use href="#i-external"/></svg></button></div><p style="font-size:9px;line-height:1.75;color:#8B7C95">网站只读 <span class="mono" style="font-size:8px;color:#624B76">GET /api/public/v1/collections/${esc(collection.slug)}</span>。标题、顺序与摘要来自线上快照。</p><div class="mini-contract">${esc(`{
+      <div class="detail-lower"><section class="panel"><div class="panel-head" style="margin-bottom:7px"><div class="panel-title" style="font-size:19px">读取契约 <small>PUBLIC SHAPE</small></div><button class="panel-link" data-action="collection-preview">打开完整响应 <svg class="icon sm"><use href="#i-external"/></svg></button></div><p style="font-size:12px;line-height:1.75;color:#8B7C95">网站只读 <span class="mono" style="font-size:12px;color:#624B76">GET /api/public/v1/collections/${esc(collection.slug)}</span>。标题、顺序与摘要来自线上快照。</p><div class="mini-contract">${esc(`{
   "slug": ${JSON.stringify(collection.slug)},
   "title": ${JSON.stringify(collection.title)},
   "items": [
     { "position": 0, "caption": ${JSON.stringify(state.collectionItems[0]?.item?.caption || '')} },
     { "position": 1, "caption": ${JSON.stringify(state.collectionItems[1]?.item?.caption || '')} }
   ]
-}`)}</div></section><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:18px">引用这个集合 <small>CONSUMERS</small></div><span class="pill ${collection.site_id ? 'site' : 'published'}" style="height:21px;font-size:8px"><i></i>${collection.site_id ? '站点集合' : '库级集合'}</span></div><div class="ref-site-row"><span class="mark">${esc((sites[collection.site_id]?.name || '库').slice(0, 1))}</span><span class="grow"><b>${esc(sites[collection.site_id]?.name || '所有站点可读')}</b><span>${collection.site_id ? '仅在归属站点可打开' : '库级集合对任意站点开放'}</span></span><span class="mono">${state.collectionItems.length} items</span></div><div class="upload-note" style="margin-top:12px"><b>改顺序不会立刻影响缓存。</b> 公开响应最多缓存 60 秒；带站点令牌的响应不缓存。</div></section></div></div>`;
+}`)}</div></section><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:19px">引用这个集合 <small>CONSUMERS</small></div><span class="pill ${collection.site_id ? 'site' : 'published'}" style="height:21px;font-size:12px"><i></i>${collection.site_id ? '站点集合' : '库级集合'}</span></div><div class="ref-site-row"><span class="mark">${esc((sites[collection.site_id]?.name || '库').slice(0, 1))}</span><span class="grow"><b>${esc(sites[collection.site_id]?.name || '所有站点可读')}</b><span>${collection.site_id ? '仅在归属站点可打开' : '库级集合对任意站点开放'}</span></span><span class="mono">${state.collectionItems.length} items</span></div><div class="upload-note" style="margin-top:12px"><b>改顺序不会立刻影响缓存。</b> 公开响应最多缓存 60 秒；带站点令牌的响应不缓存。</div></section></div></div>`;
   }
 
   function openNewCollectionModal() {
@@ -1497,7 +1674,7 @@
     };
     openModal({
       kicker: 'Public contract / 公开接口', title: `${state.collection.slug} · 读取结构`, wide: true,
-      body: `<p style="font-size:9.5px;color:#8B7C95;margin-bottom:12px;line-height:1.75">网站通过公开 API 读取这个集合。下面的示例来自当前管理视图；真正响应只包含已发布且对该站点可见的条目。</p><pre class="api-preview">${esc(JSON.stringify(data, null, 2))}</pre>`,
+      body: `<p style="font-size:12px;color:#8B7C95;margin-bottom:12px;line-height:1.75">网站通过公开 API 读取这个集合。下面的示例来自当前管理视图；真正响应只包含已发布且对该站点可见的条目。</p><pre class="api-preview">${esc(JSON.stringify(data, null, 2))}</pre>`,
       footer: `<span class="hint">GET /api/public/v1/collections/${esc(state.collection.slug)}</span><button class="btn secondary sm" data-close-modal>关闭</button>`,
     });
   }
@@ -1590,7 +1767,7 @@
   }
 
   function grantsGuideHTML() {
-    return `<div class="panel" style="padding:21px 23px;max-width:900px"><div class="panel-title">授权语义速查 <small>GRANTS EXPLAINED</small></div><div class="field-grid" style="gap:20px;margin-top:15px"><div><div class="section-label" style="margin-bottom:7px">COLLECTION ACCESS</div><p style="font-size:9.5px;line-height:1.85;color:#786A82">集合能不能打开，只看 <b>site_id</b>。库级集合对所有站点公开；属于某个站点的集合，只对那个站点开放。前缀授权不参与这个判断。</p><div class="aside-rule"></div><div class="section-label" style="margin-bottom:7px">CONTENT VISIBILITY</div><p style="font-size:9.5px;line-height:1.85;color:#786A82">前缀授权决定两件事：仅站点内容必须出现在已授权集合里；未列出内容要显式允许，才会出现在集合列表中。</p></div><div class="upload-note" style="margin-top:0;background:#F2ECF6;line-height:1.9"><b>示例：</b><br><span class="mono">home</span> → 覆盖 <span class="mono">home.hero</span>、<span class="mono">home.secondary</span><br><span class="mono">home</span> → 不覆盖 <span class="mono">homepage</span><br><br>带站点令牌但令牌无效：返回 <b>401</b>，不降级为匿名；否则「令牌用错」会显示成「内容不存在」。</div></div></div>`;
+    return `<div class="panel" style="padding:21px 23px;max-width:900px"><div class="panel-title">授权语义速查 <small>GRANTS EXPLAINED</small></div><div class="field-grid" style="gap:20px;margin-top:15px"><div><div class="section-label" style="margin-bottom:7px">COLLECTION ACCESS</div><p style="font-size:12px;line-height:1.85;color:#786A82">集合能不能打开，只看 <b>site_id</b>。库级集合对所有站点公开；属于某个站点的集合，只对那个站点开放。前缀授权不参与这个判断。</p><div class="aside-rule"></div><div class="section-label" style="margin-bottom:7px">CONTENT VISIBILITY</div><p style="font-size:12px;line-height:1.85;color:#786A82">前缀授权决定两件事：仅站点内容必须出现在已授权集合里；未列出内容要显式允许，才会出现在集合列表中。</p></div><div class="upload-note" style="margin-top:0;background:#F2ECF6;line-height:1.9"><b>示例：</b><br><span class="mono">home</span> → 覆盖 <span class="mono">home.hero</span>、<span class="mono">home.secondary</span><br><span class="mono">home</span> → 不覆盖 <span class="mono">homepage</span><br><br>带站点令牌但令牌无效：返回 <b>401</b>，不降级为匿名；否则「令牌用错」会显示成「内容不存在」。</div></div></div>`;
   }
 
   function openCreateSiteModal() {
@@ -1616,7 +1793,7 @@
       state.grants[site.id] = grants;
       openModal({
         kicker: 'Grants / 站点授权', title: `${site.name || site.key} · 集合前缀`, wide: true,
-        body: `<div class="section-label" style="margin-bottom:8px">CURRENT GRANTS</div>${grants.map(grant => `<div class="reference-row" style="border-top:0"><svg class="icon"><use href="#i-shield"/></svg><div><b style="font-size:9.5px;color:#554560">${esc(grant.prefix)}</b><div class="mono">${grant.can_read_unlisted ? 'can_read_unlisted = true' : 'only listed content'}</div></div><span class="mono">${esc(grant.id.slice(0, 8))}</span><button class="btn ghost xs" style="color:#8E4650;margin-left:8px" data-action="grant-remove" data-site="${attr(site.id)}" data-id="${attr(grant.id)}">移除</button></div>`).join('') || '<div class="inline-note">还没有授权。这个站点只能打开库级集合。</div>'}<div class="aside-rule"></div><form id="addGrantForm" data-form="add-grant" data-site="${attr(site.id)}"><div class="form-error"></div><div class="field-grid"><div class="field"><label>前缀 <span class="mini">PREFIX</span></label><input class="input mono" name="prefix" required maxlength="128" placeholder="home"></div><div class="field"><label>未列出内容 <span class="mini">CAN READ UNLISTED</span></label><label class="check-row" style="height:36px"><input type="checkbox" name="can_read_unlisted">允许出现在集合里</label></div></div></form>`,
+        body: `<div class="section-label" style="margin-bottom:8px">CURRENT GRANTS</div>${grants.map(grant => `<div class="reference-row" style="border-top:0"><svg class="icon"><use href="#i-shield"/></svg><div><b style="font-size:12px;color:#554560">${esc(grant.prefix)}</b><div class="mono">${grant.can_read_unlisted ? 'can_read_unlisted = true' : 'only listed content'}</div></div><span class="mono">${esc(grant.id.slice(0, 8))}</span><button class="btn ghost xs" style="color:#8E4650;margin-left:8px" data-action="grant-remove" data-site="${attr(site.id)}" data-id="${attr(grant.id)}">移除</button></div>`).join('') || '<div class="inline-note">还没有授权。这个站点只能打开库级集合。</div>'}<div class="aside-rule"></div><form id="addGrantForm" data-form="add-grant" data-site="${attr(site.id)}"><div class="form-error"></div><div class="field-grid"><div class="field"><label>前缀 <span class="mini">PREFIX</span></label><input class="input mono" name="prefix" required maxlength="128" placeholder="home"></div><div class="field"><label>未列出内容 <span class="mini">CAN READ UNLISTED</span></label><label class="check-row" style="height:36px"><input type="checkbox" name="can_read_unlisted">允许出现在集合里</label></div></div></form>`,
         footer: `<span class="hint">前缀按点号分段匹配，添加后立即生效。</span><button class="btn secondary sm" data-close-modal>关闭</button><button class="btn primary sm" data-submit-form="addGrantForm">添加授权</button>`,
       });
     }).catch(error => toast(error.message, 'error'));
@@ -1680,8 +1857,8 @@
 
   function usersHTML() {
     const selected = state.selectedUser;
-    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Accounts<span class="slash">/</span><span class="en">账号与权限</span></div><h1>谁可以碰这些内容</h1><p class="desc">唯一所有者不读权限表；编辑的内容与文案能力由所有者逐项授予或收回。</p></div><div class="actions"><button class="btn primary sm" data-action="new-editor"><svg class="icon sm"><use href="#i-plus"/></svg>新建编辑</button></div></div>
-      <div class="users-layout"><div class="user-list-panel"><div class="user-list-head"><span>${state.users.length} ACCOUNTS</span><span>ROLE / STATUS</span></div>${state.users.map(user => `<button class="user-row ${selected?.id === user.id ? 'active' : ''}" data-action="select-user" data-id="${attr(user.id)}"><div class="avatar">${esc(user.username.slice(0, 1).toUpperCase())}</div><div class="info"><div class="name">${esc(user.username)} <span class="role-label">${user.role === 'owner' ? 'OWNER' : 'EDITOR'}</span></div><div class="role">${user.role === 'owner' ? '全部权限' : `${user.permissions.length} / ${PERMISSIONS.length} 项能力`}</div></div><div class="last">${user.disabled ? '已停用' : '正常'}</div></button>`).join('')}<div class="filter-rule" style="margin:0;padding:12px 14px">内容与文案分别授权；拥有文案修改或发布权限时可查看文案草稿。</div></div>
+    return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>Accounts<span class="slash">/</span><span class="en">账号与权限</span></div><h1>谁可以碰这些内容</h1><p class="desc">唯一所有者不读权限表；编辑的内容、文案与区块能力由所有者逐项授予或收回。</p></div><div class="actions"><button class="btn primary sm" data-action="new-editor"><svg class="icon sm"><use href="#i-plus"/></svg>新建编辑</button></div></div>
+      <div class="users-layout"><div class="user-list-panel"><div class="user-list-head"><span>${state.users.length} ACCOUNTS</span><span>ROLE / STATUS</span></div>${state.users.map(user => `<button class="user-row ${selected?.id === user.id ? 'active' : ''}" data-action="select-user" data-id="${attr(user.id)}"><div class="avatar">${esc(user.username.slice(0, 1).toUpperCase())}</div><div class="info"><div class="name">${esc(user.username)} <span class="role-label">${user.role === 'owner' ? 'OWNER' : 'EDITOR'}</span></div><div class="role">${user.role === 'owner' ? '全部权限' : `${user.permissions.length} / ${PERMISSIONS.length} 项能力`}</div></div><div class="last">${user.disabled ? '已停用' : '正常'}</div></button>`).join('')}<div class="filter-rule" style="margin:0;padding:12px 14px">内容、文案与区块分别授权。拥有某一类的修改或发布权限时，可以查看该类草稿。</div></div>
       ${selected ? userDetailHTML(selected) : '<div class="panel"><div class="empty-state" style="border:0"><h2>还没有账号</h2></div></div>'}
       </div>`;
   }
@@ -1769,7 +1946,7 @@
       ${state.trash.length ? `<div class="panel" style="padding:7px 19px 0"><div class="table-wrap" style="border:0"><table class="data-table"><thead><tr><th>内容</th><th>进入时间</th><th>类型</th><th>大小</th><th>状态</th><th style="text-align:right">操作</th></tr></thead><tbody>${state.trash.map(asset => {
         const version = asset.current_version;
         return `<tr><td><div class="trash-item"><span class="trash-thumb type-art" data-kind="${attr(asset.kind)}"><span class="type-mark">${esc(KINDS[asset.kind]?.code || '—')}</span></span><div><div class="trash-name">${esc(asset.title || '未命名内容')}</div><div class="trash-sub">${esc(version?.original_filename || '无版本')}</div></div></div></td><td class="mono">${esc(dateFmt(asset.trashed_at || asset.updated_at))}</td><td>${esc(KINDS[asset.kind]?.label || asset.kind)}</td><td class="mono">${bytes(version?.byte_size)}</td><td>${starPill(asset.status, asset.visibility)}</td><td><div class="trash-actions"><button class="btn ghost xs" data-action="trash-restore" data-id="${attr(asset.id)}"><svg class="icon sm"><use href="#i-rotate"/></svg>恢复</button>${isOwner() ? `<button class="btn ghost xs" style="color:#8E5158" data-action="trash-purge" data-id="${attr(asset.id)}">彻底删除</button>` : ''}</div></td></tr>`;
-      }).join('')}</tbody></table></div></div><div class="trash-lower"><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:18px">保留与清理 <small>RETENTION WINDOW</small></div><span class="mono" style="font-size:7px;color:#A093A8">30 DAYS</span></div><p style="font-size:9px;line-height:1.75;color:#8B7C95">内容在回收站中仍计入磁盘占用。到期后由维护任务彻底删除；仍被封面或集合引用时会跳过。</p><div class="retention-track"><span class="keep"></span><span class="expire"></span></div><div class="retention-labels"><span>今天</span><span>自动清理窗口</span></div><div class="free-space"><div class="big">${state.trash.length}<span style="font-family:var(--mono);font-size:8px;color:#9A8CA2"> 条</span></div><span>当前回收站内容<br>恢复不会自动重新公开</span></div></section><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:18px">删除前会检查 <small>REFERENCE GUARD</small></div><svg class="icon" style="color:#8D72A0"><use href="#i-shield"/></svg></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>没有被用作封面<span class="mono">SERVER</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>没有被集合包含<span class="mono">SERVER</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>原件与派生文件可删除<span class="mono">SERVER</span></div><div class="upload-note" style="margin-top:11px"><b>彻底删除不可撤销。</b> 审计记录会保留动作、操作者与时间，但不保留文件字节。</div></section></div>` : `<div class="empty-state"><div class="empty-icon"><svg class="icon"><use href="#i-trash"/></svg></div><h2>回收站是空的</h2><p>被删除的内容会先留在这里，30 天内可恢复或由所有者彻底删除。</p><div class="empty-actions"><button class="btn secondary sm" data-route="library">回到内容库</button></div></div>`}`;
+      }).join('')}</tbody></table></div></div><div class="trash-lower"><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:19px">保留与清理 <small>RETENTION WINDOW</small></div><span class="mono" style="font-size:13px;color:#A093A8">30 DAYS</span></div><p style="font-size:12px;line-height:1.75;color:#8B7C95">内容在回收站中仍计入磁盘占用。到期后由维护任务彻底删除；仍被封面或集合引用时会跳过。</p><div class="retention-track"><span class="keep"></span><span class="expire"></span></div><div class="retention-labels"><span>今天</span><span>自动清理窗口</span></div><div class="free-space"><div class="big">${state.trash.length}<span style="font-family:var(--mono);font-size:12px;color:#9A8CA2"> 条</span></div><span>当前回收站内容<br>恢复不会自动重新公开</span></div></section><section class="panel"><div class="panel-head" style="margin-bottom:9px"><div class="panel-title" style="font-size:19px">删除前会检查 <small>REFERENCE GUARD</small></div><svg class="icon" style="color:#8D72A0"><use href="#i-shield"/></svg></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>没有被用作封面<span class="mono">SERVER</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>没有被集合包含<span class="mono">SERVER</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>原件与派生文件可删除<span class="mono">SERVER</span></div><div class="upload-note" style="margin-top:11px"><b>彻底删除不可撤销。</b> 审计记录会保留动作、操作者与时间，但不保留文件字节。</div></section></div>` : `<div class="empty-state"><div class="empty-icon"><svg class="icon"><use href="#i-trash"/></svg></div><h2>回收站是空的</h2><p>被删除的内容会先留在这里，30 天内可恢复或由所有者彻底删除。</p><div class="empty-actions"><button class="btn secondary sm" data-route="library">回到内容库</button></div></div>`}`;
   }
 
   function confirmRestore(id) {
@@ -1827,18 +2004,18 @@
     const backup = health.last_backup;
     return `<div class="page-head"><div><div class="eyebrow"><span class="dot"></span>System<span class="slash">/</span><span class="en">系统状态</span></div><h1>安静地运行</h1><p class="desc">磁盘、内存、队列与备份；发生降级时，这里会先于网站察觉。</p></div><div class="actions"><button class="btn secondary sm" data-action="system-refresh"><svg class="icon sm"><use href="#i-refresh"/></svg>刷新</button><button class="btn secondary sm" data-action="ops-command"><svg class="icon sm"><use href="#i-command"/></svg>运维命令</button></div></div>
       <div class="health-hero"><div class="health-orb" style="background:${health.status === 'ok' ? '#E8F9F1' : '#FBF0F2'};color:${health.status === 'ok' ? '#237452' : '#8E4650'};border-color:${health.status === 'ok' ? '#CEEEE0' : '#E7C8CE'}"><svg class="icon lg"><use href="#${health.status === 'ok' ? 'i-check' : 'i-alert'}"/></svg></div><div class="health-copy"><b>${health.status === 'ok' ? '所有核心服务运行正常' : '服务处于降级状态'}</b><span>${health.status === 'ok' ? 'API · WORKER · SQLITE · PUBLIC LINKS' : esc((health.reasons || []).join(' · '))}</span></div><div class="actions"><span class="pill ${health.status === 'ok' ? 'published' : 'private'}" style="height:26px"><i></i>${health.status === 'ok' ? '健康' : '降级'}</span></div></div>
-      <div class="stat-grid"><div class="stat-card"><div class="label"><span>磁盘 / DISK</span><svg class="icon sm"><use href="#i-database"/></svg></div><div class="value">${bytes(free)} <small>可用</small></div><div class="foot">${used !== null ? `已用 ${bytes(used)} / ${bytes(total)}` : '无法读取磁盘'}</div><div class="spark-bar"><span style="width:${percent}%"></span></div></div><div class="stat-card"><div class="label"><span>队列 / QUEUE</span><svg class="icon sm"><use href="#i-activity"/></svg></div><div class="value">${queue} <small>待处理</small></div><div class="foot">失败 ${num(jobs.failed || 0)} · 运行中 ${num(jobs.running || 0)}</div><div class="spark-bar"><span style="width:${Math.min(100, queue * 10)}%"></span></div></div><div class="stat-card"><div class="label"><span>版本 / VERSION</span><svg class="icon sm"><use href="#i-server"/></svg></div><div class="value" style="font-size:18px">${esc(health.app_version || '—')} <small>schema ${esc(health.schema_version || '—')}</small></div><div class="foot">SQLite · local disk</div><div class="spark-bar"><span style="width:100%"></span></div></div><div class="stat-card"><div class="label"><span>备份 / BACKUP</span><svg class="icon sm"><use href="#i-clock"/></svg></div><div class="value" style="font-size:18px">${backup ? esc(backup.backup) : '尚无备份'}</div><div class="foot">${backup ? `${esc(backup.completed_at || '')}` : '按运维手册执行停写备份'}</div><div class="spark-bar"><span style="width:${backup ? 100 : 0}%"></span></div></div></div>
+      <div class="stat-grid"><div class="stat-card"><div class="label"><span>磁盘 / DISK</span><svg class="icon sm"><use href="#i-database"/></svg></div><div class="value">${bytes(free)} <small>可用</small></div><div class="foot">${used !== null ? `已用 ${bytes(used)} / ${bytes(total)}` : '无法读取磁盘'}</div><div class="spark-bar"><span style="width:${percent}%"></span></div></div><div class="stat-card"><div class="label"><span>队列 / QUEUE</span><svg class="icon sm"><use href="#i-activity"/></svg></div><div class="value">${queue} <small>待处理</small></div><div class="foot">失败 ${num(jobs.failed || 0)} · 运行中 ${num(jobs.running || 0)}</div><div class="spark-bar"><span style="width:${Math.min(100, queue * 10)}%"></span></div></div><div class="stat-card"><div class="label"><span>版本 / VERSION</span><svg class="icon sm"><use href="#i-server"/></svg></div><div class="value" style="font-size:19px">${esc(health.app_version || '—')} <small>schema ${esc(health.schema_version || '—')}</small></div><div class="foot">SQLite · local disk</div><div class="spark-bar"><span style="width:100%"></span></div></div><div class="stat-card"><div class="label"><span>备份 / BACKUP</span><svg class="icon sm"><use href="#i-clock"/></svg></div><div class="value" style="font-size:19px">${backup ? esc(backup.backup) : '尚无备份'}</div><div class="foot">${backup ? `${esc(backup.completed_at || '')}` : '按运维手册执行停写备份'}</div><div class="spark-bar"><span style="width:${backup ? 100 : 0}%"></span></div></div></div>
       <div class="tabs-line"><button class="${state.systemTab === 'health' ? 'active' : ''}" data-action="system-tab" data-tab="health">运行状态 <span class="count">LIVE</span></button><button class="${state.systemTab === 'audit' ? 'active' : ''}" data-action="system-tab" data-tab="audit">审计日志 <span class="count">${state.audit.length}</span></button></div>
       ${state.systemTab === 'audit' ? auditHTML() : healthTabHTML(health, disk, percent)}
     `;
   }
 
   function healthTabHTML(health, disk, percent) {
-    return `<div class="system-grid"><div class="panel"><div class="panel-head"><div class="panel-title">后台任务 <small>JOB QUEUE · SINGLE WORKER</small></div><button class="panel-link" data-action="system-refresh"><svg class="icon sm"><use href="#i-refresh"/></svg>刷新</button></div><div class="table-wrap" style="border:0"><table class="data-table" style="min-width:560px"><thead><tr><th>任务</th><th>状态</th><th>尝试</th><th>创建</th><th>最近错误</th></tr></thead><tbody>${state.jobs.length ? state.jobs.map(job => `<tr><td class="mono">${esc(job.kind)}<div class="mono">${esc(job.id.slice(0, 8))}…</div></td><td>${(() => { const [label, cls] = JOB_STATUS[job.status] || [job.status, 'draft']; return `<span class="pill ${cls}" style="height:19px;font-size:7.5px"><i></i>${esc(label)}</span>`; })()}</td><td class="mono">${job.attempts} / 3</td><td class="mono">${esc(dateFmt(job.created_at))}</td><td class="mono" title="${attr(job.last_error || '')}">${esc(job.last_error || '—')}</td></tr>`).join('') : '<tr><td colspan="5"><div class="inline-note" style="border:0;background:transparent">队列是空的。</div></td></tr>'}</tbody></table></div><div class="upload-note" style="margin-top:12px"><b>低内存保护。</b> 可用内存低于阈值时，解码类任务保持 pending，定时发布与清理继续执行。</div></div><div><div class="panel"><div class="panel-head"><div class="panel-title">磁盘 <small>DATA FILESYSTEM</small></div><span class="panel-link">${esc(disk.data_dir || '—')}</span></div><div class="disk-detail"><div class="disk-number">${bytes(disk.free_bytes)} <small>可用 / ${bytes(disk.total_bytes)}</small></div><div class="disk-legend"><span><i></i>可用 ${percent}%</span></div></div><div class="disk-bar"><span class="used" style="width:${100 - percent}%"></span><span class="other" style="width:${percent}%"></span></div><div class="disk-caption"><span>内容目录所在文件系统</span><span>低于阈值时拒绝新上传</span></div><div class="aside-rule"></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>健康状态<span class="mono">${esc(health.status)}</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>迁移版本<span class="mono">${esc(health.schema_version || '—')}</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>上次备份<span class="mono">${health.last_backup ? esc(health.last_backup.backup) : '—'}</span></div></div><div class="panel" style="margin-top:14px"><div class="panel-head" style="margin-bottom:8px"><div class="panel-title" style="font-size:17px">维护动作 <small>SERVER-SIDE</small></div><span class="pill draft">CLI</span></div><p style="font-size:9px;line-height:1.8;color:#897A94">fsck、停写备份与 restore 都需要在服务器维护窗口执行；管理端只读展示状态，避免误触。</p><div class="wide-actions"><button class="btn secondary xs" data-action="ops-command">查看命令</button></div></div></div></div>`;
+    return `<div class="system-grid"><div class="panel"><div class="panel-head"><div class="panel-title">后台任务 <small>JOB QUEUE · SINGLE WORKER</small></div><button class="panel-link" data-action="system-refresh"><svg class="icon sm"><use href="#i-refresh"/></svg>刷新</button></div><div class="table-wrap" style="border:0"><table class="data-table" style="min-width:560px"><thead><tr><th>任务</th><th>状态</th><th>尝试</th><th>创建</th><th>最近错误</th></tr></thead><tbody>${state.jobs.length ? state.jobs.map(job => `<tr><td class="mono">${esc(job.kind)}<div class="mono">${esc(job.id.slice(0, 8))}…</div></td><td>${(() => { const [label, cls] = JOB_STATUS[job.status] || [job.status, 'draft']; return `<span class="pill ${cls}" style="height:19px;font-size:13px"><i></i>${esc(label)}</span>`; })()}</td><td class="mono">${job.attempts} / 3</td><td class="mono">${esc(dateFmt(job.created_at))}</td><td class="mono" title="${attr(job.last_error || '')}">${esc(job.last_error || '—')}</td></tr>`).join('') : '<tr><td colspan="5"><div class="inline-note" style="border:0;background:transparent">队列是空的。</div></td></tr>'}</tbody></table></div><div class="upload-note" style="margin-top:12px"><b>低内存保护。</b> 可用内存低于阈值时，解码类任务保持 pending，定时发布与清理继续执行。</div></div><div><div class="panel"><div class="panel-head"><div class="panel-title">磁盘 <small>DATA FILESYSTEM</small></div><span class="panel-link">${esc(disk.data_dir || '—')}</span></div><div class="disk-detail"><div class="disk-number">${bytes(disk.free_bytes)} <small>可用 / ${bytes(disk.total_bytes)}</small></div><div class="disk-legend"><span><i></i>可用 ${percent}%</span></div></div><div class="disk-bar"><span class="used" style="width:${100 - percent}%"></span><span class="other" style="width:${percent}%"></span></div><div class="disk-caption"><span>内容目录所在文件系统</span><span>低于阈值时拒绝新上传</span></div><div class="aside-rule"></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>健康状态<span class="mono">${esc(health.status)}</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>迁移版本<span class="mono">${esc(health.schema_version || '—')}</span></div><div class="token-health"><svg class="icon"><use href="#i-check"/></svg>上次备份<span class="mono">${health.last_backup ? esc(health.last_backup.backup) : '—'}</span></div></div><div class="panel" style="margin-top:14px"><div class="panel-head" style="margin-bottom:8px"><div class="panel-title" style="font-size:18px">维护动作 <small>SERVER-SIDE</small></div><span class="pill draft">CLI</span></div><p style="font-size:12px;line-height:1.8;color:#897A94">fsck、停写备份与 restore 都需要在服务器维护窗口执行；管理端只读展示状态，避免误触。</p><div class="wide-actions"><button class="btn secondary xs" data-action="ops-command">查看命令</button></div></div></div></div>`;
   }
 
   function auditHTML() {
-    return `<div class="panel" style="padding:19px 20px"><div class="panel-head"><div class="panel-title">审计日志 <small>AUDIT LOG · RECENT ${state.audit.length}</small></div><span class="mono" style="font-size:7.5px;color:#9A90A5">READ ONLY</span></div><div class="table-wrap" style="border:0"><table class="data-table" style="min-width:680px"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>来源</th></tr></thead><tbody>${state.audit.length ? state.audit.map(entry => `<tr><td class="mono">${esc(dateFmt(entry.created_at))}</td><td><div class="actor"><span class="audit-dot upload"></span>${esc(entry.actor_name || entry.actor_type)}</div></td><td>${esc(AUDIT_LABELS[entry.action] || entry.action)}</td><td class="mono">${esc(entry.target_type || '—')} ${entry.target_id ? esc(entry.target_id.slice(0, 8)) + '…' : ''}</td><td class="mono">${esc(entry.detail?.ip || entry.detail?.username || '—')}</td></tr>`).join('') : '<tr><td colspan="5"><div class="inline-note" style="border:0;background:transparent">还没有审计记录。</div></td></tr>'}</tbody></table></div><div class="token-empty-note">审计只保留操作者、动作、目标与时间；访问上报不进入审计日志。</div></div>`;
+    return `<div class="panel" style="padding:19px 20px"><div class="panel-head"><div class="panel-title">审计日志 <small>AUDIT LOG · RECENT ${state.audit.length}</small></div><span class="mono" style="font-size:13px;color:#9A90A5">READ ONLY</span></div><div class="table-wrap" style="border:0"><table class="data-table" style="min-width:680px"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>来源</th></tr></thead><tbody>${state.audit.length ? state.audit.map(entry => `<tr><td class="mono">${esc(dateFmt(entry.created_at))}</td><td><div class="actor"><span class="audit-dot upload"></span>${esc(entry.actor_name || entry.actor_type)}</div></td><td>${esc(AUDIT_LABELS[entry.action] || entry.action)}</td><td class="mono">${esc(entry.target_type || '—')} ${entry.target_id ? esc(entry.target_id.slice(0, 8)) + '…' : ''}</td><td class="mono">${esc(entry.detail?.ip || entry.detail?.username || '—')}</td></tr>`).join('') : '<tr><td colspan="5"><div class="inline-note" style="border:0;background:transparent">还没有审计记录。</div></td></tr>'}</tbody></table></div><div class="token-empty-note">审计只保留操作者、动作、目标与时间；访问上报不进入审计日志。</div></div>`;
   }
 
   function openOpsCommands() {
@@ -1870,7 +2047,8 @@ ctrlstore fsck --fix-public-links</code><div class="section-label" style="margin
       switch (actionEl.dataset.action) {
         case 'open-search': openSearch(); break;
         case 'new-text': openNewTextModal(); break;
-        case 'new-folder': openNewFolderModal(); break;
+        case 'new-folder': openNewFolderModal(actionEl.hasAttribute('data-parent') ? (actionEl.dataset.parent || '') : undefined); break;
+        case 'delete-folder': confirmDeleteFolder(actionEl.dataset.id || ''); break;
         case 'lib-kind': state.library.kind = actionEl.dataset.kind || ''; await reloadLibrary(); break;
         case 'lib-folder': state.library.folder_id = actionEl.dataset.id || ''; await reloadLibrary(); break;
         case 'lib-tag': state.library.tag = state.library.tag === actionEl.dataset.slug ? '' : actionEl.dataset.slug; await reloadLibrary(); break;
@@ -1903,6 +2081,20 @@ ctrlstore fsck --fix-public-links</code><div class="section-label" style="margin
         case 'editor-preview': $('#mdPreview')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); toast('预览位于右侧'); break;
         case 'insert-md': insertMarkdown(actionEl); break;
         case 'upload-pick': $('#fileInput')?.click(); break;
+        case 'upload-folder-expand': {
+          const id = actionEl.dataset.id;
+          state.uploadExpanded[id] = !state.uploadExpanded[id];
+          paintUploadFolders();
+          break;
+        }
+        case 'upload-folder': {
+          state.uploadFolderId = actionEl.dataset.id || '';
+          if (state.uploadFolderId && actionEl.dataset.expandable === '1' && !state.uploadExpanded[state.uploadFolderId]) {
+            state.uploadExpanded[state.uploadFolderId] = true;
+          }
+          syncUploadFolderChoice();
+          break;
+        }
         case 'upload-retry': {
           const item = state.uploadQueue.find(row => row.id === actionEl.dataset.id);
           if (item?.status === 'error' && item.retryable) { item.status = 'queued'; item.error = null; renderUploadQueue(); processUploadQueue(); }

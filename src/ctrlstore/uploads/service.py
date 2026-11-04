@@ -185,10 +185,20 @@ def _ensure_index(index: int) -> None:
 
 
 def complete(
-    db: DbSession, *, settings: Settings, storage: LocalStorage, session: UploadSession
+    db: DbSession,
+    *,
+    settings: Settings,
+    storage: LocalStorage,
+    session: UploadSession,
+    folder_id: str | None = None,
 ) -> UploadSession:
-    """合并、校验、落盘。任一步失败都清掉临时目录并把会话标成失败。"""
+    """合并、校验、落盘。任一步失败都清掉临时目录并把会话标成失败。
+
+    ``folder_id`` 只作用于新建内容。替换已有内容时忽略它，避免换文件顺便改目录。
+    目录在合并前先核对，不存在就停在当前会话，不把已经收齐的分片标成失败。
+    """
     ensure_writable(db, storage=storage, session=session)
+    placed_in = None if session.asset_id else assets._folder_id(db, folder_id)
     indices = _contiguous_parts(session)
     _ensure_capacity(settings)
 
@@ -223,6 +233,7 @@ def complete(
             session=session,
             merged=merged,
             inspection=result,
+            folder_id=placed_in,
         )
     except inspection.RejectedFile as exc:
         _fail(db, storage, session, message=str(exc))

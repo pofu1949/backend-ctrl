@@ -68,11 +68,13 @@ def register_upload(
     session: UploadSession,
     merged: Path,
     inspection: Inspection,
+    folder_id: str | None = None,
 ) -> tuple[Asset, AssetVersion]:
     """把一次已完成的上传登记成内容（新内容或该内容的新版本）。
 
     ``session.asset_id`` 为空表示新建；有值表示替换那条内容。
-    字节已经在临时目录里校验通过，这里只负责按最终键落盘并写库。
+    新建时 ``folder_id`` 为空就放在根目录，有值则必须是已存在的目录。
+    替换不改目录。字节已经在临时目录里校验通过，这里只负责按最终键落盘并写库。
     返回 (内容, 新版本)：调用方不用再去猜哪一版是当前版本。
     """
     owner = db.get(User, session.actor_id)
@@ -86,7 +88,7 @@ def register_upload(
     else:
         asset = Asset(
             kind=inspection.kind,
-            folder_id=None,
+            folder_id=_folder_id(db, folder_id),
             owner_id=owner.id,
             title=title_from_filename(session.original_filename),
             language="zh-CN",

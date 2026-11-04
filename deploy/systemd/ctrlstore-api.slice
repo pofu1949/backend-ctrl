@@ -1,4 +1,4 @@
-# CtrlStore API 的两个进程共用这一份 512M 上限（企划第 17 章）。
+# CtrlStore API 的两个进程共用这一份 512M 上限。
 # 实例与 worker 的单元见同目录的 ctrlstore-api@.service 与 ctrlstore-worker.service。
 [Unit]
 Description=CtrlStore API 进程组

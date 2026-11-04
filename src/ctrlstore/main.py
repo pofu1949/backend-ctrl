@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import sessionmaker
 
@@ -99,9 +99,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_router, prefix=ADMIN_PREFIX)
     app.include_router(public_router, prefix=PUBLIC_PREFIX)
 
+    @app.middleware("http")
+    async def public_files_cors(request, call_next):
+        # 页面上的画布和 WebGL 会读取 /p/ 图片。跨端口时浏览器要求公开文件带回源。
+        if request.method == "OPTIONS" and request.url.path.startswith("/p/"):
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+        response = await call_next(request)
+        if request.url.path.startswith("/p/"):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
+
     # 管理端是同一进程提供的单页应用。静态资源只有应用样式与脚本，
     # HTML 不内联数据；未登录时页面只显示登录框，真实数据仍由 /api/admin 保护。
     app.mount("/admin/assets", StaticFiles(directory=ASSETS_DIR), name="admin-assets")
+    # 生产由 Nginx 把 public/ 映射到 /p/。本地关掉 X-Accel 时没有那一层，
+    # 公开地址会全部 404。这里只挂已发布目录，原件目录仍然不对外。
+    if not settings.x_accel_redirect:
+        app.mount(
+            "/p",
+            StaticFiles(directory=settings.public_dir, check_dir=False),
+            name="public-files",
+        )
 
     @app.get("/admin", include_in_schema=False)
     def admin_redirect() -> RedirectResponse:
@@ -130,8 +155,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return check_health(settings).as_public()
 
     @app.get("/", include_in_schema=False)
-    def root() -> dict[str, str]:
-        """最小自述，供部署后确认连到了哪个版本。"""
-        return {"service": "ctrlstore", "version": __version__}
+    def root() -> RedirectResponse:
+        """浏览器打开根地址就进入管理端。进程是否存活仍看 ``/healthz``。"""
+        return RedirectResponse(url="/admin/", status_code=302)
 
     return app

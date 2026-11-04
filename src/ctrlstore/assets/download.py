@@ -33,8 +33,12 @@ def send_file(
     storage: LocalStorage,
     asset: Asset,
     version: AssetVersion,
+    inline: bool = False,
 ) -> Response:
-    """把某个版本的原件发出去。调用方负责先做权限与状态检查。"""
+    """把某个版本的原件发出去。调用方负责先做权限与状态检查。
+
+    ``inline`` 给管理端的视频预览用：浏览器要能拖动进度，不能把响应标成附件。
+    """
     path = storage.original_path(version.storage_key)
     if not path.is_file():
         raise ApiError.not_found("文件不存在")
@@ -42,9 +46,9 @@ def send_file(
     headers = {
         "Content-Type": version.mime,
         # 原始文件名要按 RFC 5987 编码；磁盘路径里不出现它（企划第 9 章）。
-        "Content-Disposition": _disposition(version.original_filename),
-        # 私有内容不进任何共享缓存。
-        "Cache-Control": "private, no-store",
+        "Content-Disposition": _disposition(version.original_filename, inline=inline),
+        # 私有内容不进任何共享缓存。预览允许本机短缓存，否则 video 拖不动进度。
+        "Cache-Control": "private, max-age=300" if inline else "private, no-store",
         "X-Content-Type-Options": "nosniff",
     }
 
@@ -69,11 +73,12 @@ def _internal_uri(storage_key: str) -> str:
     return INTERNAL_PREFIX + "/".join(quote(part, safe="") for part in storage_key.split("/"))
 
 
-def _disposition(filename: str) -> str:
+def _disposition(filename: str, *, inline: bool = False) -> str:
     """RFC 5987：ASCII 回退 + UTF-8 文件名。"""
     fallback = filename.encode("ascii", "ignore").decode() or "download"
     quoted = quote(filename, safe="")
-    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
+    kind = "inline" if inline else "attachment"
+    return f"{kind}; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
 
 
 def now_seconds() -> int:

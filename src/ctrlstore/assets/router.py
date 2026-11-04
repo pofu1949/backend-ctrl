@@ -476,10 +476,14 @@ def purge_asset(
 def download_asset(
     asset_id: str,
     request: Request,
+    inline: bool = Query(default=False),
     principal: deps.Principal = Depends(deps.require_permission("asset.read")),
     db: DbSession = Depends(deps.get_db),
 ) -> Response:
-    """管理下载：任意状态都能取原件，鉴权后交给 Nginx 内部跳转（支持 Range）。"""
+    """管理下载：任意状态都能取原件，鉴权后交给 Nginx 内部跳转（支持 Range）。
+
+    ``inline=1`` 只改变浏览器怎么展示，权限与文件范围和下载相同。
+    """
     asset = service.get_asset(db, asset_id)
     version = service.current_version(asset)
     if version is None:
@@ -490,6 +494,7 @@ def download_asset(
         storage=_storage(request),
         asset=asset,
         version=version,
+        inline=inline,
     )
 
 

@@ -61,3 +61,13 @@ def move_folder(
         db, service.get_folder(db, folder_id), parent_id=payload.parent_id, actor=principal.user
     )
     return FolderOut.model_validate(folder)
+
+
+@router.delete("/folders/{folder_id}", status_code=204, response_model=None)
+def delete_folder(
+    folder_id: str,
+    principal: deps.Principal = Depends(deps.require_permission("folder.manage")),
+    db: DbSession = Depends(deps.get_db),
+) -> None:
+    """删除目录及子孙。内容保留，只解除目录归属。"""
+    service.delete_folder(db, service.get_folder(db, folder_id), actor=principal.user)

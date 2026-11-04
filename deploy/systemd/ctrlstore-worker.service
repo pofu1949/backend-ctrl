@@ -20,7 +20,7 @@ Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30
 
-# 解码大图、读大表时的峰值由这里封顶；超限由 systemd 停掉再拉起（企划第 17.2 节）。
+# 解码大图、读大表时的峰值由这里封顶；超限由 systemd 停掉再拉起。
 MemoryMax=768M
 
 NoNewPrivileges=yes

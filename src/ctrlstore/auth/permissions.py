@@ -22,7 +22,9 @@ CONTENT_PERMISSIONS: tuple[str, ...] = (
 
 #: 命令行预设：一次授予全部八项。
 ENTRY_PERMISSIONS = ("entry.update", "entry.publish")
-PERMISSIONS = CONTENT_PERMISSIONS + ENTRY_PERMISSIONS
+#: 区块与文案一样，修改和发布分开，避免没审核的草稿进网站。
+SECTION_PERMISSIONS = ("section.update", "section.publish")
+PERMISSIONS = CONTENT_PERMISSIONS + ENTRY_PERMISSIONS + SECTION_PERMISSIONS
 PRESET_EDITOR = frozenset(CONTENT_PERMISSIONS)
 PRESET_COPYWRITER = frozenset(ENTRY_PERMISSIONS)
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, File, Form, Path, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Path, Query, Request, UploadFile
 from sqlalchemy.orm import Session as DbSession
 
 from .. import idempotency
@@ -109,19 +109,23 @@ async def put_part(
 def complete_upload(
     request: Request,
     upload_id: str,
+    folder_id: str | None = Query(default=None, max_length=36),
     principal: deps.Principal = Depends(deps.writer),
     db: DbSession = Depends(deps.get_db),
 ) -> UploadSessionOut:
     """合并并校验。支持 ``Idempotency-Key``：网络重试不会产生第二份原件。
 
     权限在这里再查一次：会话建好之后被收回权限，也不能靠「已经拿到会话」完成替换。
+    ``folder_id`` 为空时新建内容落在根目录；替换已有内容时这个参数不起作用。
     """
     settings = _settings(request)
     session = service.get_session(db, upload_id, actor=principal.user)
     deps.ensure_permission(principal, service.required_permission(session))
+    if folder_id == "":
+        folder_id = None
 
     key = request.headers.get(idempotency.HEADER)
-    request_hash = idempotency.hash_request(f"{upload_id}:{session.byte_limit}")
+    request_hash = idempotency.hash_request(f"{upload_id}:{session.byte_limit}:{folder_id or ''}")
     if key:
         replayed = idempotency.lookup(
             db,
@@ -139,6 +143,7 @@ def complete_upload(
         settings=settings,
         storage=LocalStorage.from_settings(settings),
         session=session,
+        folder_id=folder_id,
     )
     result = UploadSessionOut.of(session, duplicate_of=service.duplicate_of(db, session))
     if key:

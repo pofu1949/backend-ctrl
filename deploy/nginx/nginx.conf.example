@@ -1,4 +1,4 @@
-# CtrlStore 的 Nginx 主配置示例（企划第 17.2 节）。
+# CtrlStore 的 Nginx 主配置示例。两个 worker，内存占用由 systemd 另行限制。
 #
 # 放在 /etc/nginx/nginx.conf（或 include 到主配置里）。站点片段见同目录的
 # ctrlstore.conf.example；这份只负责全局进程数与连接数，不放在 sites-available 里。

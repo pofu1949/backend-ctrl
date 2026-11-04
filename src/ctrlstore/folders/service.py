@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from .. import audit
 from ..errors import ApiError
-from ..models import ROOT_PATH, Folder, User, utcnow
+from ..models import ROOT_PATH, Asset, Folder, User, utcnow
 
 #: 目录名长度上限，与列宽一致。
 MAX_NAME_LENGTH = 128
@@ -114,6 +114,44 @@ def move_folder(
         detail={"before": old_path, "after": folder.path},
     )
     return folder
+
+
+def delete_folder(db: DbSession, folder: Folder, *, actor: User | None = None) -> None:
+    """删除目录及其子孙。
+
+    内容留在库里，只把 ``folder_id`` 清空。父目录外键是 RESTRICT，
+    所以先解开内容，再从最深的子孙开始删，避免父目录还挂着子目录。
+    """
+    folder_id = folder.id
+    folder_path = folder.path
+    prefix = f"{folder_path}/"
+    targets = [
+        item
+        for item in db.scalars(select(Folder)).all()
+        if item.id == folder_id or item.path.startswith(prefix)
+    ]
+    targets.sort(key=lambda item: len(item.path), reverse=True)
+    ids = [item.id for item in targets]
+    assets = list(db.scalars(select(Asset).where(Asset.folder_id.in_(ids))).all())
+    now = utcnow()
+    for asset in assets:
+        asset.folder_id = None
+        asset.revision += 1
+        asset.updated_at = now
+    if assets:
+        db.flush()
+    for item in targets:
+        db.delete(item)
+        db.flush()
+    audit.record(
+        db,
+        action=audit.FOLDER_DELETED,
+        actor_type=audit.ACTOR_USER if actor else audit.ACTOR_SYSTEM,
+        actor_id=actor.id if actor else "",
+        target_type=audit.TARGET_FOLDER,
+        target_id=folder_id,
+        detail={"path": folder_path, "removed": len(targets), "unfiled": len(assets)},
+    )
 
 
 # —— 内部 ——
