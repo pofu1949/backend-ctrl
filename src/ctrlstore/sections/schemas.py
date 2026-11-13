@@ -20,12 +20,10 @@ class CreateSection(BaseModel):
     slug: str
     language: str = "zh-CN"
     title: str = ""
-    template: str = "stack"
+    template: Literal["stack"] = "stack"
     visibility: Literal["public", "site"] = "public"
     site_id: str | None = None
-    body: dict[str, Any] | str | None = None
-    #: 能读本区块所引用「仅站点」素材的站点。不放进正文。
-    reader_ids: list[str] | None = None
+    body: dict[str, Any] | None = None
 
 
 class UpdateSection(BaseModel):
@@ -37,15 +35,13 @@ class UpdateSection(BaseModel):
     title: str | None = None
     visibility: Literal["public", "site"] | None = None
     site_id: str | None = None
-    body: dict[str, Any] | str | None = None
-    reader_ids: list[str] | None = None
+    body: dict[str, Any] | None = None
 
 
 class SectionAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=1)
-    reader_ids: list[str] | None = None
 
 
 class SectionOut(BaseModel):
@@ -57,16 +53,14 @@ class SectionOut(BaseModel):
     template: str
     visibility: Literal["public", "site"]
     status: Literal["draft", "published"]
-    body: dict[str, Any] | str
-    reader_ids: list[str] = Field(default_factory=list)
+    body: dict[str, Any]
     published_slug: str | None
     published_language: str | None
     published_site_id: str | None
     published_title: str | None
     published_template: str | None
     published_visibility: str | None
-    published_body: dict[str, Any] | str | None
-    published_reader_ids: list[str] = Field(default_factory=list)
+    published_body: dict[str, Any] | None
     revision: int
     published_at: datetime | None
     created_at: datetime

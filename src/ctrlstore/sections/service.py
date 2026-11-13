@@ -11,21 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from .. import audit
+from ..collections.service import prefix_matches
 from ..config import Settings
 from ..errors import ApiError
 from ..models import ASSET_PUBLISHED, Asset, Section, Site, User, utcnow
 from ..uploads.inspection import KIND_IMAGE, KIND_VIDEO
-from . import access, readers
 from .template import TEMPLATES
-from .validation import (
-    MAX_BODY_BYTES,
-    asset_ids,
-    empty_body,
-    get_template,
-    normalize,
-    prefix_matches,
-    validate_meta,
-)
+from .validation import MAX_BODY_BYTES, asset_ids, empty_body, normalize, validate_meta
 
 _META = ("slug", "language", "site_id", "title", "template", "visibility")
 _MEDIA_KINDS = {KIND_IMAGE, KIND_VIDEO}
@@ -51,13 +43,10 @@ def list_sections(
     language: str | None = None,
     prefix: str | None = None,
     status: str | None = None,
-    template_ids: list[str] | None = None,
     cursor: str | None = None,
     limit: int = 50,
 ) -> tuple[list[Section], str | None]:
     statement = select(Section)
-    if template_ids is not None:
-        statement = statement.where(Section.template.in_(template_ids))
     if language:
         validate_meta({"language": language})
         statement = statement.where(Section.language == language)
@@ -85,7 +74,8 @@ def create(db: DbSession, *, settings: Settings, fields: dict[str, Any], actor: 
     raw_body = fields["body"] if fields.get("body") is not None else empty_body(template_id)
     body = normalize(template_id, raw_body, strict=False)
     begin_write(db)
-    _enforce_quota(db, settings, template_id)
+    if db.scalar(select(func.count()).select_from(Section)) >= settings.section_limit:
+        raise ApiError.conflict(f"已达区块条数上限（{settings.section_limit} 条）")
     _check_site(db, meta.get("site_id"))
     _ensure_slug_free(
         db,
@@ -110,8 +100,6 @@ def create(db: DbSession, *, settings: Settings, fields: dict[str, Any], actor: 
         db.flush()
     except IntegrityError as exc:
         raise ApiError.conflict("这个别名在该语言和站点下已经存在") from exc
-    if fields.get("reader_ids") is not None:
-        readers.replace(db, section.id, fields["reader_ids"], published=False)
     _audit(db, section, actor, audit.SECTION_CREATED)
     return section
 
@@ -139,10 +127,6 @@ def update(
         if fields["body"] is None:
             raise ApiError.invalid("区块正文不能为空值")
         section.body = _dump(normalize(section.template, fields["body"], strict=False))
-    if "reader_ids" in fields:
-        if fields["reader_ids"] is None:
-            raise ApiError.invalid("读者名单不能为空值")
-        readers.replace(db, section.id, fields["reader_ids"], published=False)
     _ensure_slug_free(
         db,
         section_id=section.id,
@@ -160,26 +144,14 @@ def update(
     return section
 
 
-def publish(
-    db: DbSession,
-    section_id: str,
-    *,
-    revision: int,
-    actor: User,
-    reader_ids: list[str] | None = None,
-    replace_readers: bool = False,
-) -> Section:
+def publish(db: DbSession, section_id: str, *, revision: int, actor: User) -> Section:
     begin_write(db)
     section = get(db, section_id)
     _check_revision(section, revision)
-    if replace_readers:
-        readers.replace(db, section.id, reader_ids or [], published=False)
     body = normalize(section.template, _load(section.body), strict=True)
     encoded = _dump(body)
     _require_published_media(db, section.template, body)
-    draft_readers = readers.ids(db, section.id, published=False)
-    live_readers = readers.ids(db, section.id, published=True)
-    if _snapshot_matches(section, encoded) and set(draft_readers) == set(live_readers):
+    if _snapshot_matches(section, encoded):
         return section
     _ensure_published_slug_free(db, section)
     section.body = encoded
@@ -193,7 +165,6 @@ def publish(
     section.status = "published"
     section.revision += 1
     section.updated_at = section.published_at = utcnow()
-    readers.copy_draft_to_published(db, section.id)
     try:
         db.flush()
     except IntegrityError as exc:
@@ -219,7 +190,6 @@ def unpublish(db: DbSession, section_id: str, *, revision: int, actor: User) -> 
     section.status = "draft"
     section.revision += 1
     section.updated_at = utcnow()
-    readers.clear_published(db, section.id)
     db.flush()
     _audit(db, section, actor, audit.SECTION_UNPUBLISHED)
     return section
@@ -374,40 +344,7 @@ def _audit(db: DbSession, section: Section, actor: User, action: str) -> None:
     )
 
 
-def find_by_alias(
-    db: DbSession, *, template_id: str, slug: str, language: str, site_id: str | None
-) -> Section | None:
-    statement = select(Section).where(
-        Section.template == template_id,
-        Section.slug == slug,
-        Section.language == language,
-    )
-    if site_id is None:
-        statement = statement.where(Section.site_id.is_(None))
-    else:
-        statement = statement.where(Section.site_id == site_id)
-    return db.scalar(statement)
-
-
-def _enforce_quota(db: DbSession, settings: Settings, template_id: str) -> None:
-    """文案和页面区块分开计数，避免短句占满页面区块的名额。"""
-    kind = get_template(template_id).access
-    if kind == "copy":
-        limit = settings.entry_limit
-        label = "文案"
-        selected = access.ids_for("copy")
-    else:
-        limit = settings.section_limit
-        label = "区块"
-        selected = access.ids_for("section")
-    count = db.scalar(
-        select(func.count()).select_from(Section).where(Section.template.in_(selected))
-    )
-    if count >= limit:
-        raise ApiError.conflict(f"已达{label}条数上限（{limit} 条）")
-
-
-def _dump(body: Any) -> str:
+def _dump(body: dict[str, Any]) -> str:
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > MAX_BODY_BYTES:
         raise ApiError.too_large("区块正文过大")

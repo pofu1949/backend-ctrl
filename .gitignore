@@ -1,10 +1,7 @@
 # 虚拟环境与本地工具链（按需重建）
 .venv/
+.venv-linux/
 .tools/
-
-# uv 缓存（uv.lock 仍进版本库）
-.uv/
-.uv-cache/
 
 # Python 编译产物
 __pycache__/
@@ -22,6 +19,16 @@ dist/
 *.db-wal
 *.db-shm
 data/
+*.log
+
+# 机密配置（只来自环境变量或 0600 密钥文件）
+.env
+.env.*
+secrets.toml
+
+# 设计文档不进版本库
+plan/
+docs/
 
 # 本地临时脚本
 scratch/

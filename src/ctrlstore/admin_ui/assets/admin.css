@@ -292,7 +292,7 @@ h1,h2,h3,h4,p{margin:0}
 .tree-item.child{padding-left:27px}
 .tree-caret{width:11px;height:11px;color:#B0A4B5}
 .tag-filter{display:flex;flex-wrap:wrap;gap:5px;padding:0 8px}
-.tag-filter button{height:23px;padding:0 8px;border-radius:999px;border:1px solid #E1D7E9;background:rgba(251,248,241,.6);font-size:12px;color:#796685;transition:background .15s,border .15s,color .15s}
+.tag-filter button{min-height:23px;height:auto;padding:3px 8px;max-width:100%;white-space:normal;line-height:1.45;border-radius:999px;border:1px solid #E1D7E9;background:rgba(251,248,241,.6);font-size:12px;color:#796685;transition:background .15s,border .15s,color .15s}
 .tag-filter button:hover{background:var(--lav);color:var(--violet-2)}
 .tag-filter button.on{background:var(--violet-3);border-color:var(--violet-3);color:#F9F7FF}
 .filter-rule{border-top:1px solid var(--line);margin-top:22px;padding:13px 8px 0;font-size:12px;color:#9B8DA2;line-height:1.7}

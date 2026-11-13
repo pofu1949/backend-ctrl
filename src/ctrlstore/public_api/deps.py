@@ -6,11 +6,11 @@
 
 可见性矩阵（企划第 12.7 节）：
 
-| 状态 + 可见性 | 匿名 | 站点令牌 |
+| 状态 + 可见性 | 匿名 | 站点令牌（已授权集合内） |
 | --- | --- | --- |
 | 已发布 + public | 可读 | 可读 |
-| 已发布 + unlisted | 知道地址可读，目录不列出 | 知道地址可读，目录不列出 |
-| 已发布 + site | 不可读 | 仅当已发布且授权给该站点的区块引用了它 |
+| 已发布 + unlisted | 知道地址可读，集合不列出 | 可读，且集合里列出（需 ``can_read_unlisted``） |
+| 已发布 + site | 不可读 | 可读 |
 | 私有 / 草稿 / 归档 / 回收站 | 不可读 | 不可读 |
 """
 
@@ -24,6 +24,7 @@ from typing import Any
 
 from fastapi import Depends, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
 from ..auth import deps as auth_deps
@@ -37,9 +38,9 @@ from ..models import (
     VISIBILITY_UNLISTED,
     Asset,
     Collection,
+    CollectionItem,
     Site,
 )
-from ..sections import readers as section_readers
 
 #: 匿名公开 JSON 的缓存时间（企划第 12.6 节）。
 PUBLIC_MAX_AGE = 60
@@ -71,7 +72,7 @@ def can_read_asset(db: DbSession, asset: Asset, *, site: Site | None) -> bool:
         # 未列出：知道完整地址就能读，但不会出现在集合与搜索里。
         return True
     if asset.visibility == VISIBILITY_SITE:
-        return site is not None and section_readers.authorizes_asset(db, asset.id, site.id)
+        return site is not None and _in_granted_collection(db, asset, site)
     # private 只有管理接口能读。
     return False
 
@@ -100,11 +101,24 @@ def searchable(db: DbSession, asset: Asset, *, site: Site | None) -> bool:
     """站点搜索能不能列出这条。
 
     「未列出」内容知道地址可以读，但不该被搜索发现——发现型接口按目录型处理。
-    其余沿用 :func:`can_read_asset`：公开可读；仅站点必须被已授权区块引用。
+    其余沿用 :func:`can_read_asset`：公开可读，仅站点必须出现在已授权集合里。
     """
     if site is None or not can_read_asset(db, asset, site=site):
         return False
     return asset.visibility != VISIBILITY_UNLISTED
+
+
+def _in_granted_collection(db: DbSession, asset: Asset, site: Site) -> bool:
+    """「仅站点」内容必须出现在该站点已授权的集合里。"""
+    slugs = db.scalars(
+        select(Collection.slug)
+        .join(CollectionItem, CollectionItem.collection_id == Collection.id)
+        .where(CollectionItem.asset_id == asset.id)
+    ).all()
+    if not slugs:
+        return False
+    grants = collections.granted_prefixes(db, site)
+    return any(collections.prefix_matches(grant.prefix, slug) for grant in grants for slug in slugs)
 
 
 def json_response(request: Request, *, site: Site | None, payload: dict[str, Any]) -> JSONResponse:

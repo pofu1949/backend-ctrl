@@ -110,7 +110,6 @@ class AssetOut(BaseModel):
             published_slug=asset.published_slug,
             publish_at=asset.publish_at,
             trashed_at=asset.trashed_at,
-            tags=[TagRefOut.model_validate(tag) for tag in asset.tags],
             created_at=asset.created_at,
             updated_at=asset.updated_at,
         )

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session as DbSession
 
-from .. import idempotency
+from .. import idempotency, usage
 from ..auth import deps
 from ..content import markdown_render
 from ..errors import ApiError
@@ -35,6 +35,7 @@ from .schemas import (
     CreateTextAssetRequest,
     RenderBodyRequest,
     SignedUrlOut,
+    TagRefOut,
     UpdateAssetRequest,
     VersionActionRequest,
 )
@@ -50,8 +51,21 @@ def _storage(request: Request) -> LocalStorage:
     return LocalStorage.from_settings(_settings(request))
 
 
-def _detail(asset) -> AssetDetailOut:
-    return AssetDetailOut.detailed(asset, current=service.current_version(asset))
+def _detail(db: DbSession, asset) -> AssetDetailOut:
+    return _tagged(
+        AssetDetailOut.detailed(asset, current=service.current_version(asset)),
+        usage.build(db),
+        asset.id,
+    )
+
+
+def _tagged(out: AssetOut, index: dict[str, usage.UsageTag], asset_id: str) -> AssetOut:
+    """标签统一派生自集合/区块引用，不读标签表。"""
+    out.tags = [
+        TagRefOut(id=tag.slug, name=tag.name, slug=tag.slug)
+        for tag in usage.for_asset(index, asset_id)
+    ]
+    return out
 
 
 def _replayed(
@@ -102,7 +116,7 @@ def list_assets(
     kind: str | None = Query(default=None, max_length=16),
     folder_id: str | None = Query(default=None),
     status: str | None = Query(default=None, max_length=16),
-    tag: str | None = Query(default=None, max_length=64, description="标签 slug"),
+    tag: str | None = Query(default=None, max_length=160, description="用途标签 slug（集合/区块派生）"),
     q: str | None = Query(default=None, max_length=128, description="标题或别名子串"),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=service.DEFAULT_LIMIT, ge=1, le=service.MAX_LIMIT),
@@ -120,8 +134,12 @@ def list_assets(
         cursor=cursor,
         limit=limit,
     )
+    index = usage.build(db)
     return AssetListOut(
-        items=[AssetOut.of(asset, current=service.current_version(asset)) for asset in items],
+        items=[
+            _tagged(AssetOut.of(asset, current=service.current_version(asset)), index, asset.id)
+            for asset in items
+        ],
         next_cursor=next_cursor,
     )
 
@@ -147,7 +165,7 @@ def create_text_asset(
         slug=payload.slug,
         summary=payload.summary,
     )
-    return AssetDetailOut.detailed(asset, current=version)
+    return _detail(db, asset)
 
 
 @router.get("/assets/{asset_id}", response_model=AssetDetailOut)
@@ -156,7 +174,7 @@ def read_asset(
     _: deps.Principal = Depends(deps.require_permission("asset.read")),
     db: DbSession = Depends(deps.get_db),
 ) -> AssetDetailOut:
-    return _detail(service.get_asset(db, asset_id))
+    return _detail(db, service.get_asset(db, asset_id))
 
 
 # —— 管理端预览与正文 ——
@@ -343,7 +361,7 @@ def update_asset(
         # 状态却还是「已发布」，读的人会看到 404 而库里说在线。
         db.commit()
         publish.sync_links(storage, asset)
-    return _detail(asset)
+    return _detail(db, asset)
 
 
 # —— 发布与生命周期 ——
@@ -383,7 +401,7 @@ def publish_asset(
             revision=payload.revision,
             actor=principal.user,
         )
-    result = _detail(asset)
+    result = _detail(db, asset)
     _remember(request, principal, payload, result, db)
     return result
 
@@ -405,7 +423,7 @@ def unpublish_asset(
     publish.unpublish(
         db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
     )
-    result = _detail(asset)
+    result = _detail(db, asset)
     _remember(request, principal, payload, result, db)
     return result
 
@@ -422,7 +440,7 @@ def archive_asset(
     publish.archive(
         db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
     )
-    return _detail(asset)
+    return _detail(db, asset)
 
 
 @router.post("/assets/{asset_id}/trash", response_model=AssetDetailOut)
@@ -438,7 +456,7 @@ def trash_asset(
     publish.trash(
         db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
     )
-    return _detail(asset)
+    return _detail(db, asset)
 
 
 @router.post("/assets/{asset_id}/restore", response_model=AssetDetailOut)
@@ -454,7 +472,7 @@ def restore_asset(
     publish.restore(
         db, storage=_storage(request), asset=asset, revision=payload.revision, actor=principal.user
     )
-    return _detail(asset)
+    return _detail(db, asset)
 
 
 @router.delete("/assets/{asset_id}", status_code=204, response_model=None)

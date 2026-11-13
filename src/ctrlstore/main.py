@@ -32,22 +32,6 @@ from .stats.throttle import PageviewThrottle
 
 logger = logging.getLogger(__name__)
 
-
-def _import_legacy_content(app: FastAPI) -> None:
-    """把已有文案和集合授权补进区块。只增不删，重复启动不会再插一遍。"""
-    from .sections.legacy import import_legacy
-
-    factory = app.state.session_factory
-    with factory() as db:
-        try:
-            stats = import_legacy(db)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-    if any(stats.values()):
-        logger.info("旧文案与集合授权已补进区块", extra=stats)
-
 #: 管理接口前缀（企划第 13 章）。
 ADMIN_PREFIX = "/api/admin/v1"
 
@@ -87,7 +71,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         run_migrations(settings, engine=app.state.engine)
         logger.info("数据库已迁移到最新版本", extra={"database": str(settings.db_path)})
-        _import_legacy_content(app)
         try:
             yield
         finally:

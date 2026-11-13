@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as DbSession
 
-from .. import audit, quota
+from .. import audit, quota, usage
 from ..config import Settings
 from ..content import schedule as content_schedule
 from ..errors import ApiError
@@ -524,7 +524,7 @@ def list_assets(
         needle = f"%{query.strip()}%"
         statement = statement.where(or_(Asset.title.ilike(needle), Asset.slug.ilike(needle)))
     if tag:
-        statement = statement.join(Asset.tags).where(Tag.slug == tag)
+        statement = statement.where(Asset.id.in_(usage.asset_ids(usage.build(db), tag)))
 
     if cursor:
         created_at, _, identifier = cursor.partition("~")

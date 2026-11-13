@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from ..auth import deps
 from ..models import Tag
+from .. import usage
 from . import service
 
 router = APIRouter(tags=["tags"])
@@ -28,17 +29,34 @@ class CreateTagRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
 
+class UsageTagOut(BaseModel):
+    """派生标签：来自集合/区块引用，count 为引用它的素材数。"""
+
+    slug: str
+    name: str
+    kind: str
+    count: int
+
+
 class MergeTagRequest(BaseModel):
     into: str = Field(min_length=1, description="接收内容的标签 ID")
 
 
-@router.get("/tags", response_model=list[TagOut])
+@router.get("/tags", response_model=list[UsageTagOut])
 def list_tags(
     q: str | None = Query(default=None, description="按名称子串筛选"),
     _: deps.Principal = Depends(deps.require_permission("asset.read")),
     db: DbSession = Depends(deps.get_db),
-) -> list[TagOut]:
-    return [TagOut.model_validate(tag) for tag in service.list_tags(db, query=q)]
+) -> list[UsageTagOut]:
+    """标签实时派生自集合成员与区块配图引用，不读标签表。"""
+    tags = usage.sorted_tags(usage.build(db))
+    if q:
+        needle = q.strip()
+        tags = [tag for tag in tags if needle in tag.name]
+    return [
+        UsageTagOut(slug=tag.slug, name=tag.name, kind=tag.kind, count=len(tag.asset_ids))
+        for tag in tags
+    ]
 
 
 @router.post("/tags", response_model=TagOut)

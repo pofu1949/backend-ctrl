@@ -42,36 +42,20 @@ class FieldSpec:
 
 @dataclass(frozen=True)
 class Template:
-    """一份版式。
-
-    ``shape`` 为 ``object`` 时正文是字段对象；为 ``text`` 时正文是一个字符串。
-    ``access`` 为 ``section`` 时沿用页面区块权限；为 ``copy`` 时文案权限也能改。
-    新增版式只改这里，授权判断读这两个标记，不必再改一处判断。
-    """
-
     id: str
     label: str
     description: str
     fields: tuple[FieldSpec, ...]
-    example: dict[str, Any] | str
-    shape: str = "object"
-    access: str = "section"
-    text_max_length: int = 0
-    text_max_bytes: int = 0
+    example: dict[str, Any]
 
     def public_dict(self) -> dict[str, Any]:
-        payload = {
+        return {
             "id": self.id,
             "label": self.label,
             "description": self.description,
-            "shape": self.shape,
-            "access": self.access,
             "fields": [field.public_dict() for field in self.fields],
             "example": self.example,
         }
-        if self.shape == "text":
-            payload["max_length"] = self.text_max_length
-        return payload
 
 
 _POINT_FIELDS = (
@@ -145,17 +129,4 @@ STACK = Template(
     },
 )
 
-#: 没有版式的短句。别名就是原来的文案键，例如 ``nav.about``。
-COPY = Template(
-    id="copy",
-    label="文案",
-    description="一段没有版式的文字。别名就是网站读取用的键，例如 nav.about。",
-    fields=(),
-    example="关于云栖",
-    shape="text",
-    access="copy",
-    text_max_length=2000,
-    text_max_bytes=8192,
-)
-
-TEMPLATES: dict[str, Template] = {STACK.id: STACK, COPY.id: COPY}
+TEMPLATES: dict[str, Template] = {STACK.id: STACK}
